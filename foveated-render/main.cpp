@@ -4,10 +4,24 @@
 #include <glm/gtc/type_ptr.hpp>
 #include <GLFW/glfw3.h>
 
+#include <deque>
+#include <vector>
+#include <onnxruntime_cxx_api.h>
+#include <cmath>
+#include <utility>
+//#include <torch/script.h>
+// 
+// 
 
-//#include "imgui.h"
-//#include "imgui_impl_opengl3.h"
-//#include "imgui_impl_glfw.h"
+#include <onnxruntime_cxx_api.h>
+
+//Eye tracking data
+#include <tobii_gameintegration.h>
+
+
+// #include "imgui.h"
+// #include "imgui_impl_opengl3.h"
+// #include "imgui_impl_glfw.h"
 
 #include "shader.h"
 #include "camera.h"
@@ -17,51 +31,33 @@
 #include <iostream>
 #include <algorithm>
 #include <vector>
-/*
-#define GL_SHADING_RATE_IMAGE_NV 0x9563
-#define GL_SHADING_RATE_IMAGE_PER_PRIMITIVE_NV 0x95B1
-#define GL_SHADING_RATE_IMAGE_TEXEL_WIDTH_NV 0x955C
-#define GL_SHADING_RATE_IMAGE_TEXEL_HEIGHT_NV 0x955D
-#define GL_SHADING_RATE_IMAGE_PALETTE_SIZE_NV 0x955E
-#define GL_SHADING_RATE_NO_INVOCATIONS_NV 0x9564
-#define GL_SHADING_RATE_1_INVOCATION_PER_PIXEL_NV 0x9565
-#define GL_SHADING_RATE_IMAGE_PALETTE_SIZE_NV 0x955E
-#define GL_SHADING_RATE_1_INVOCATION_PER_2X2_PIXELS_NV 0x9568
-#define GL_SHADING_RATE_1_INVOCATION_PER_4X4_PIXELS_NV 0x956B
 
-typedef void(APIENTRYP PFNGLBINDSHADINGRATEIMAGENVPROC)(GLuint texture);
-PFNGLBINDSHADINGRATEIMAGENVPROC glBindShadingRateImageNV = nullptr;
-
-typedef void(APIENTRYP PFNGLSHADINGRATEIMAGEPALETTENVPROC)(GLuint viewport, GLuint first, GLsizei count, const GLenum *rates);
-PFNGLSHADINGRATEIMAGEPALETTENVPROC glShadingRateImagePaletteNV = nullptr;
-*/
+typedef struct
+{
+    unsigned int fbo;
+    unsigned int texture;
+    unsigned int rbo;
+} FBO;
 
 void framebuffer_size_callback(GLFWwindow* window, int width, int height);
 void processInput(GLFWwindow* window);
 void mouse_callback(GLFWwindow* window, double xpos, double ypos);
 void scroll_callback(GLFWwindow* window, double xoffset, double yoffset);
-void createFoveationTexture(float centerX, float centerY);
-void uploadFoveationDataToTexture(GLuint texture);
-void setupShadingRatePalette();
-void APIENTRY glDebugOutput(GLenum source, GLenum type, unsigned int id, GLenum severity, GLsizei length, const char* message, const void* userParam);
-void renderCube();
-void createTexture(GLuint& glid);
 void mouse_button_callback(GLFWwindow* window, int button, int action, int mods);
+FBO createFBO(int width, int height);
+void renderScene(Shader& shader, Model model);
+glm::vec2 gazeAngleToNorm(float predicted_x_deg, float predicted_y_deg);
+std::pair<float, float> pixelsToDegrees(float px_x, float px_y);
+std::pair<float, float> pixelsToDegreesFromNormalized(float norm_x, float norm_y);
+
 
 // settings
-const unsigned int SCR_WIDTH = 1600;
-const unsigned int SCR_HEIGHT = 900;
+const unsigned int SCR_WIDTH = 2560;
+const unsigned int SCR_HEIGHT = 1440;
+float SCR_WIDTH_MM = 382.0f;
+float SCR_HEIGHT_MM = 215.0f;
+float DIST_MM = 800.0f;
 
-
-// VRS stuff
-/*
-GLuint fov_texture;
-std::vector<uint8_t> m_shadingRateImageData;
-uint32_t m_shadingRateImageWidth = 0;
-uint32_t m_shadingRateImageHeight = 0;
-GLint m_shadingRateImageTexelWidth;
-GLint m_shadingRateImageTexelHeight;
-*/
 float posX = 0.5;
 float posY = 0.5;
 
@@ -75,8 +71,52 @@ float deltaTime = 0.0f;
 float lastFrame = 0.0f;
 
 bool showShading = false;
+bool isCursorEnabled = false;
+
+using namespace TobiiGameIntegration;
+
+
 int main()
 {
+
+    // Eye tracking data
+    ITobiiGameIntegrationApi* api = GetApi("Gaze Sample");
+    IStreamsProvider* streamsProvider = api->GetStreamsProvider();
+    std::cout << "Stream Provider " << streamsProvider;
+    std::cout << "API " << api->GetStatistics();
+
+    api->GetTrackerController()->TrackRectangle({ 0,0,2560,1440 });
+    GazePoint gazePoint;
+
+    std::deque<std::array<float, 2>> gaze_history;
+
+    glm::vec2 predicted;
+
+
+    std::ifstream f("C:/Users/leonardomm8/Documents/saccade_predictor_traced.pt");
+    if (!f) {
+        std::cerr << "File not found!" << std::endl;
+        return -1;
+    }
+    else {
+        std::cout << "FIle found" << std::endl;
+    }
+    f.close();
+
+    Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "saccade_predictor");
+
+    // Create session options
+    Ort::SessionOptions session_options;
+    session_options.SetIntraOpNumThreads(1);
+
+    // Load the model
+    const wchar_t* model_path = L"C:/Users/leonardomm8/Documents/saccade_predictor.onnx";
+    Ort::Session session(env, model_path, session_options);
+
+    std::cout << "Model loaded successfully!" << std::endl;
+
+
+
     // glfw: initialize and configure
     glfwInit();
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
@@ -84,7 +124,7 @@ int main()
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
 
     // glfw window creation
-    GLFWwindow* window = glfwCreateWindow(SCR_WIDTH, SCR_HEIGHT, "VRS", NULL, NULL);
+    GLFWwindow* window = glfwCreateWindow(SCR_WIDTH, SCR_HEIGHT, "Foveated render", NULL, NULL);
     if (window == NULL)
     {
         std::cout << "Failed to create GLFW window" << std::endl;
@@ -95,15 +135,15 @@ int main()
     glfwMakeContextCurrent(window);
     glfwSetFramebufferSizeCallback(window, framebuffer_size_callback);
 
-    glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
-    //glfwSetMouseButtonCallback(window, mouse_button_callback);
+    glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_HIDDEN);
+    glfwSetMouseButtonCallback(window, mouse_button_callback);
     glfwSetCursorPosCallback(window, mouse_callback);
     glfwSetScrollCallback(window, scroll_callback);
 
     // IMGUI
-    //ImGui::CreateContext();
-    //ImGui_ImplGlfw_InitForOpenGL(window, true);
-    //ImGui_ImplOpenGL3_Init("#version 460 core");
+    // ImGui::CreateContext();
+    // ImGui_ImplGlfw_InitForOpenGL(window, true);
+    // ImGui_ImplOpenGL3_Init("#version 460 core");
 
     if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress))
     {
@@ -111,56 +151,14 @@ int main()
         return -1; // Correct return here, exiting if GLAD fails
     }
 
-    //glBindShadingRateImageNV = (PFNGLBINDSHADINGRATEIMAGENVPROC)glfwGetProcAddress("glBindShadingRateImageNV");
-    /*
-    if (!glBindShadingRateImageNV)
-    {
-        std::cerr << "Failed to load glBindShadingRateImageNV!" << std::endl;
-    }
-    else
-    {
-        std::cout << "Successfully loaded glBindShadingRateImageNV!" << std::endl;
-    }
-
-    glShadingRateImagePaletteNV = (PFNGLSHADINGRATEIMAGEPALETTENVPROC)glfwGetProcAddress("glShadingRateImagePaletteNV");
-
-    if (!glShadingRateImagePaletteNV)
-    {
-        std::cerr << "Failed to load glShadingRateImagePaletteNV!" << std::endl;
-    }
-    else
-    {
-        std::cout << "Successfully loaded glShadingRateImagePaletteNV!" << std::endl;
-    }
-
-    if (!glfwExtensionSupported("GL_NV_shading_rate_image"))
-    {
-        std::cerr << "GL_NV_shading_rate_image not supported!" << std::endl;
-    }
-    */
     // OPENGL STATE
     glEnable(GL_DEPTH_TEST);
-    //glEnable(GL_SHADING_RATE_IMAGE_NV);
 
-    /*
-    glGetIntegerv(GL_SHADING_RATE_IMAGE_TEXEL_HEIGHT_NV, &m_shadingRateImageTexelHeight);
-    glGetIntegerv(GL_SHADING_RATE_IMAGE_TEXEL_WIDTH_NV, &m_shadingRateImageTexelWidth);
-
-    m_shadingRateImageWidth = (SCR_WIDTH + m_shadingRateImageTexelWidth - 1) / m_shadingRateImageTexelWidth;
-    m_shadingRateImageHeight = (SCR_HEIGHT + m_shadingRateImageTexelHeight - 1) / m_shadingRateImageTexelHeight;
-    m_shadingRateImageData.resize(m_shadingRateImageWidth * m_shadingRateImageHeight);
-
-    createTexture(fov_texture);
-    setupShadingRatePalette();
-    createFoveationTexture(0.5, 0.5);
-*/
-    Shader("geometry.vs", "geometry.fs");
     Shader shader("vrs.vs", "vrs.fs");
     Shader screenShader("screen.vs", "screen.fs");
     shader.use();
 
     std::string path = "C:\\Users\\leonardomm8\\Documents\\sponza\\sponza.obj";
-    //std::string path = "backpack/backpack.obj";
 
     Model sponza(path);
 
@@ -171,7 +169,7 @@ int main()
     }
 
     // QUAD VAO
-    float quadVertices[] = {// vertex attributes for a quad that fills the entire screen in Normalized Device Coordinates.
+    float quadVertices[] = {
         // positions   // texCoords
         -1.0f, 1.0f, 0.0f, 1.0f,
         -1.0f, -1.0f, 0.0f, 0.0f,
@@ -185,38 +183,15 @@ int main()
     glGenBuffers(1, &quadVBO);
     glBindVertexArray(quadVAO);
     glBindBuffer(GL_ARRAY_BUFFER, quadVBO);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(quadVertices), &quadVertices, GL_STATIC_DRAW);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(quadVertices), quadVertices, GL_STATIC_DRAW);
     glEnableVertexAttribArray(0);
     glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)0);
     glEnableVertexAttribArray(1);
     glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)(2 * sizeof(float)));
 
-    // FRAMEBUFFER
-    unsigned int fbo;
-    glGenFramebuffers(1, &fbo);
-    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
-
-    unsigned int texture;
-    glGenTextures(1, &texture);
-    glBindTexture(GL_TEXTURE_2D, texture);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, SCR_WIDTH, SCR_HEIGHT, 0, GL_RGB,
-        GL_UNSIGNED_BYTE, NULL);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
-        texture, 0);
-
-    unsigned int rbo;
-    glGenRenderbuffers(1, &rbo);
-    glBindRenderbuffer(GL_RENDERBUFFER, rbo);
-    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, SCR_WIDTH, SCR_HEIGHT);           // use a single renderbuffer object for both a depth AND stencil buffer.
-    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, rbo); // now actually attach it
-    // now that we actually created the framebuffer and added all attachments we want to check if it is actually complete now
-    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
-        std::cout << "ERROR::FRAMEBUFFER:: Framebuffer is not complete!" << std::endl;
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-
-    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    FBO fboHigh = createFBO(SCR_WIDTH, SCR_HEIGHT);
+    FBO fboMedium = createFBO(SCR_WIDTH / 2, SCR_HEIGHT / 2);
+    FBO fboLow = createFBO(SCR_WIDTH / 4, SCR_HEIGHT / 4);
 
     glm::vec3 pointLightPositions[] = {
         glm::vec3(0.7f, 2.2f, 2.0f),
@@ -226,15 +201,67 @@ int main()
 
     while (!glfwWindowShouldClose(window))
     {
+
+        api->Update();
+
+        streamsProvider->GetLatestGazePoint(gazePoint);
+        
         float currentFrame = glfwGetTime();
         deltaTime = currentFrame - lastFrame;
         lastFrame = currentFrame;
 
         processInput(window);
 
-        //ImGui_ImplOpenGL3_NewFrame();
-        //ImGui_ImplGlfw_NewFrame();
-        //ImGui::NewFrame();
+        auto [gaze_deg_x, gaze_deg_y] = pixelsToDegreesFromNormalized(gazePoint.X, gazePoint.Y);
+        std::cout << "Gaze degg  " << gaze_deg_x  << " - " << gaze_deg_y;
+        gaze_history.push_back({ gaze_deg_x, gaze_deg_y });
+        if (gaze_history.size() > 10)
+            gaze_history.pop_front();
+
+        // Infer only if we have 10 points
+        if (gaze_history.size() == 10)
+        {
+            // Prepare input tensor data
+            std::vector<float> input_tensor_values;
+            for (const auto& pt : gaze_history) {
+                input_tensor_values.push_back(pt[0]);  // x
+                input_tensor_values.push_back(pt[1]);  // y
+            }
+
+            // Define input shape: [1, 10, 2]
+            std::array<int64_t, 3> input_shape = { 1, 10, 2 };
+
+            Ort::MemoryInfo memory_info = Ort::MemoryInfo::CreateCpu(
+                OrtArenaAllocator, OrtMemTypeDefault);
+
+            Ort::Value input_tensor = Ort::Value::CreateTensor<float>(
+                memory_info, input_tensor_values.data(), input_tensor_values.size(),
+                input_shape.data(), input_shape.size());
+
+            // Prepare input & output names
+            const char* input_names[] = { "input" };   // Use your actual input name
+            const char* output_names[] = { "output" }; // Use your actual output name
+
+            auto output_tensors = session.Run(Ort::RunOptions{ nullptr },
+                input_names, &input_tensor, 1,
+                output_names, 1);
+
+            // Read output: should be shape [1, 2]
+            float* output = output_tensors.front().GetTensorMutableData<float>();
+            float predicted_x = output[0];
+            float predicted_y = output[1];
+
+            predicted = gazeAngleToNorm(predicted_x, predicted_y);
+            
+
+            std::cout << "Predicted landing: (" << predicted[0] << ", " << predicted[1] << ")\n";
+
+        }
+
+
+        // ImGui_ImplOpenGL3_NewFrame();
+        // ImGui_ImplGlfw_NewFrame();
+        // ImGui::NewFrame();
 
         glm::mat4 view = camera.GetViewMatrix();
         // projection matrix
@@ -245,22 +272,8 @@ int main()
         model = glm::translate(model, glm::vec3(0.0f, 0.f, 0.0f));
         model = glm::scale(model, glm::vec3(.4f, .4f, .4f));
 
-        // LIGHT FRAMEBUFFER
-        glBindFramebuffer(GL_FRAMEBUFFER, fbo);
-        glViewport(0, 0, SCR_WIDTH, SCR_HEIGHT);
-
-        glClearColor(0.2f, 0.3f, 0.3f, 1.0f);
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
         shader.use();
-        glActiveTexture(GL_TEXTURE0);
-        glEnable(GL_DEPTH_TEST);
-        //glEnable(GL_SHADING_RATE_IMAGE_NV);
-        //createFoveationTexture(posX, posY);
-        //createTexture(fov_texture);
-        //uploadFoveationDataToTexture(fov_texture);
-        //glBindShadingRateImageNV(fov_texture);
 
-        // view matrix
         shader.setMat4("view", view);
         shader.setVec3("viewPos", camera.Position);
         shader.setMat4("projection", projection);
@@ -302,41 +315,72 @@ int main()
         shader.setFloat("pointLights[3].constant", 1.0f);
         shader.setFloat("pointLights[3].linear", 0.09f);
         shader.setFloat("pointLights[3].quadratic", 0.032f);
-
-        shader.setBool("showShading", showShading);
-
-        // SPONZA
+        shader.setMat4("view", view);
+        shader.setMat4("projection", projection);
         shader.setMat4("model", model);
-        sponza.Draw(shader);
+        shader.setVec3("viewPos", camera.Position);
 
-        // ON SCREEN FRAMEBUFFER
+        glBindFramebuffer(GL_FRAMEBUFFER, fboHigh.fbo);
+        glViewport(0, 0, SCR_WIDTH, SCR_HEIGHT);
+        renderScene(shader, sponza);
+
+        glBindFramebuffer(GL_FRAMEBUFFER, fboMedium.fbo);
+        glViewport(0, 0, SCR_WIDTH / 2, SCR_HEIGHT / 2);
+        renderScene(shader, sponza);
+
+        glBindFramebuffer(GL_FRAMEBUFFER, fboLow.fbo);
+        glViewport(0, 0, SCR_WIDTH / 4, SCR_HEIGHT / 4);
+        renderScene(shader, sponza);
+
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glViewport(0, 0, SCR_WIDTH, SCR_HEIGHT);
+
         glDisable(GL_DEPTH_TEST);
         glClearColor(1.0f, 1.0f, 1.0f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT);
 
         screenShader.use();
         glBindVertexArray(quadVAO);
-        glBindTexture(GL_TEXTURE_2D, texture);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, fboHigh.texture);
+        screenShader.setInt("texHigh", 0);
+
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_2D, fboMedium.texture);
+        screenShader.setInt("texMedium", 1);
+
+        glActiveTexture(GL_TEXTURE2);
+        glBindTexture(GL_TEXTURE_2D, fboLow.texture);
+        screenShader.setInt("texLow", 2);
         glDrawArrays(GL_TRIANGLES, 0, 6);
 
-        glDisable(GL_DEPTH_TEST);
-        //ImGui::Begin("Options");
-        //ImGui::Checkbox("Shading rate view", &showShading);
-        //ImGui::End();
-        //ImGui::Render();
-        //ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+        screenShader.setVec2("gaze", glm::vec2(gazePoint.X, gazePoint.Y));
+        screenShader.setBool("showShading", showShading);
+        screenShader.setVec2("predicted", predicted);
+
+        while ((err = glGetError()) != GL_NO_ERROR)
+        {
+            std::cout << "After process" << err << std::endl;
+        }
 
         glfwSwapBuffers(window);
         glfwPollEvents();
     }
 
-    //ImGui_ImplOpenGL3_Shutdown();
-    //ImGui_ImplGlfw_Shutdown();
-    //ImGui::DestroyContext();
-
     glfwTerminate();
     return 0;
+}
+
+void renderScene(Shader& shader, Model model)
+{
+    glClearColor(0.2f, 0.3f, 0.3f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+    glEnable(GL_DEPTH_TEST);
+    shader.use();
+    glActiveTexture(GL_TEXTURE0);
+
+    model.Draw(shader);
 }
 
 void processInput(GLFWwindow* window)
@@ -351,6 +395,8 @@ void processInput(GLFWwindow* window)
         camera.ProcessKeyboard(LEFT, deltaTime);
     if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS)
         camera.ProcessKeyboard(RIGHT, deltaTime);
+    if (glfwGetKey(window, GLFW_KEY_C) == GLFW_PRESS)
+        showShading = !showShading;
 }
 
 void framebuffer_size_callback(GLFWwindow* window, int width, int height)
@@ -363,10 +409,13 @@ void mouse_button_callback(GLFWwindow* window, int button, int action, int mods)
     if (button == GLFW_MOUSE_BUTTON_LEFT && action == GLFW_PRESS)
     {
         glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+        isCursorEnabled = true;
     }
     if (button == GLFW_MOUSE_BUTTON_LEFT && action == GLFW_RELEASE)
     {
         glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_HIDDEN);
+        isCursorEnabled = false;
+
         firstMouse = true;
     }
 }
@@ -374,6 +423,8 @@ void mouse_button_callback(GLFWwindow* window, int button, int action, int mods)
 void mouse_callback(GLFWwindow* window, double xpos, double ypos)
 {
     const float sensitivity = 0.3f;
+    if (!isCursorEnabled)
+    {
 
         float xoffset_fov = ((xpos / SCR_WIDTH) - posX) * sensitivity;
         float yoffset_fov = ((1 - ypos / SCR_HEIGHT) - posY) * sensitivity;
@@ -381,6 +432,8 @@ void mouse_callback(GLFWwindow* window, double xpos, double ypos)
         posY += yoffset_fov;
         //posX = std::clamp(posX, 0.f, 1.f);
         //posY = std::clamp(posY, 0.f, 1.f);
+        return;
+    }
     if (firstMouse)
     {
         lastX = xpos;
@@ -389,7 +442,7 @@ void mouse_callback(GLFWwindow* window, double xpos, double ypos)
     }
 
     float xoffset = xpos - lastX;
-    float yoffset = lastY - ypos; // reversed: y ranges bottom to top
+    float yoffset = lastY - ypos;
     lastX = xpos;
     lastY = ypos;
     xoffset *= sensitivity;
@@ -402,148 +455,91 @@ void scroll_callback(GLFWwindow* window, double xoffest, double yoffset)
 {
     camera.ProcessMouseScroll(static_cast<float>(yoffset));
 }
-/*
-void createFoveationTexture(float centerX, float centerY)
+
+FBO createFBO(int width, int height)
 {
-    const int width = m_shadingRateImageWidth;
-    const int height = m_shadingRateImageHeight;
+    FBO fboData;
 
-    for (int y = 0; y < height; ++y)
-    {
-        for (int x = 0; x < width; ++x)
-        {
-            float fx = x / (float)width;
-            float fy = y / (float)height;
+    glGenFramebuffers(1, &fboData.fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, fboData.fbo);
 
-            float d = std::sqrt((fx - centerX) * (fx - centerX) + (fy - centerY) * (fy - centerY));
-            if (d < 0.15f)
-            {
-                m_shadingRateImageData[x + y * width] = 1;
-            }
-            else if (d < 0.3f)
-            {
-                m_shadingRateImageData[x + y * width] = 2;
-            }
-            else
-            {
-                m_shadingRateImageData[x + y * width] = 3;
-            }
-        }
-    }
+    glGenTextures(1, &fboData.texture);
+    glBindTexture(GL_TEXTURE_2D, fboData.texture);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, width, height, 0, GL_RGB, GL_UNSIGNED_BYTE, NULL);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, fboData.texture, 0);
+
+    glGenRenderbuffers(1, &fboData.rbo);
+    glBindRenderbuffer(GL_RENDERBUFFER, fboData.rbo);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, width, height);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, fboData.rbo);
+
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+        std::cerr << "Framebuffer not complete!" << std::endl;
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    return fboData;
 }
 
-void uploadFoveationDataToTexture(GLuint texture)
-{
-    glBindTexture(GL_TEXTURE_2D, texture);
-    glTexStorage2D(GL_TEXTURE_2D, 1, GL_R8UI, m_shadingRateImageWidth, m_shadingRateImageHeight);
-    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, m_shadingRateImageWidth, m_shadingRateImageHeight, GL_RED_INTEGER, GL_UNSIGNED_BYTE, &m_shadingRateImageData[0]);
+float deg2rad(float deg) {
+    return deg * 3.1415 / 180.0f;
 }
 
-void setupShadingRatePalette()
-{
-    GLint palSize;
-    glGetIntegerv(GL_SHADING_RATE_IMAGE_PALETTE_SIZE_NV, &palSize);
-    assert(palSize >= 4);
+glm::vec2 gazeAngleToNorm(float predicted_x_deg, float predicted_y_deg) {
+    std::cout << "Ang" << predicted_x_deg << " - " << predicted_y_deg << std::endl;
 
-    GLenum *palette = new GLenum[palSize];
+    float screen_width_mm = 382.0f;
+    float screen_height_mm = 215.0f;
+    float distance_mm = 800.0f;
 
-    palette[0] = GL_SHADING_RATE_NO_INVOCATIONS_NV;
-    palette[1] = GL_SHADING_RATE_1_INVOCATION_PER_PIXEL_NV;
-    palette[2] = GL_SHADING_RATE_1_INVOCATION_PER_2X2_PIXELS_NV;
-    palette[3] = GL_SHADING_RATE_1_INVOCATION_PER_4X4_PIXELS_NV;
+    int screen_width_px = 2560;
+    int screen_height_px = 1440;
 
-    for (int i = 4; i < palSize; ++i)
-    {
-        palette[i] = GL_SHADING_RATE_1_INVOCATION_PER_PIXEL_NV;
-    }
+    float x_rad = deg2rad(predicted_x_deg);
+    float y_rad = deg2rad(predicted_y_deg);
 
-    glShadingRateImagePaletteNV(0, 0, palSize, palette);
-    delete[] palette;
+    float x_mm = std::tan(x_rad) * DIST_MM;
+    float y_mm = std::tan(y_rad) * DIST_MM;
+
+    float px_x = (x_mm / SCR_WIDTH_MM) * SCR_WIDTH + SCR_WIDTH / 2.0f;
+    float px_y = (y_mm / SCR_HEIGHT_MM) * SCR_HEIGHT + SCR_HEIGHT/ 2.0f;
+    std::cout << "PX" << px_x << " - " << px_y << std::endl;
+
+    float norm_x = px_x / SCR_WIDTH;
+    float norm_y = px_y / SCR_HEIGHT;
+
+    return glm::vec2(norm_x, norm_y);
 }
 
-*/
-unsigned int cubeVAO = 0;
-unsigned int cubeVBO = 0;
-void renderCube()
-{
-    if (cubeVAO == 0)
-    {
-        float vertices[] = {
-            // back face
-            -1.0f, -1.0f, -1.0f, 0.0f, 0.0f, -1.0f, 0.0f, 0.0f, 1.0f, // bottom-left
-            1.0f, 1.0f, -1.0f, 0.0f, 0.0f, -1.0f, 1.0f, 1.0f, 1.0f,   // top-right
-            1.0f, -1.0f, -1.0f, 0.0f, 0.0f, -1.0f, 1.0f, 0.0f, 1.0f,  // bottom-right
-            1.0f, 1.0f, -1.0f, 0.0f, 0.0f, -1.0f, 1.0f, 1.0f, 1.0f,   // top-right
-            -1.0f, -1.0f, -1.0f, 0.0f, 0.0f, -1.0f, 0.0f, 0.0f, 1.0f, // bottom-left
-            -1.0f, 1.0f, -1.0f, 0.0f, 0.0f, -1.0f, 0.0f, 1.0f, 1.0f,  // top-left
-            // front face
-            -1.0f, -1.0f, 1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, // bottom-left
-            1.0f, -1.0f, 1.0f, 0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 1.0f,  // bottom-right
-            1.0f, 1.0f, 1.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f,   // top-right
-            1.0f, 1.0f, 1.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f,   // top-right
-            -1.0f, 1.0f, 1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 1.0f, 1.0f,  // top-left
-            -1.0f, -1.0f, 1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, // bottom-left
-            // left face
-            -1.0f, 1.0f, 1.0f, -1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 1.0f,   // top-right
-            -1.0f, 1.0f, -1.0f, -1.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f,  // top-left
-            -1.0f, -1.0f, -1.0f, -1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f, // bottom-left
-            -1.0f, -1.0f, -1.0f, -1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f, // bottom-left
-            -1.0f, -1.0f, 1.0f, -1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f,  // bottom-right
-            -1.0f, 1.0f, 1.0f, -1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 1.0f,   // top-right
-            // right face
-1.0f, 1.0f, 1.0f, 1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 1.0f,     // top-left
-1.0f, -1.0f, -1.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f,   // bottom-right
-1.0f, 1.0f, -1.0f, 1.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f,    // top-right
-1.0f, -1.0f, -1.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f,   // bottom-right
-1.0f, 1.0f, 1.0f, 1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 1.0f,     // top-left
-1.0f, -1.0f, 1.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f,    // bottom-left
-// bottom face
--1.0f, -1.0f, -1.0f, 0.0f, -1.0f, 0.0f, 0.0f, 1.0f, 1.0f, // top-right
-1.0f, -1.0f, -1.0f, 0.0f, -1.0f, 0.0f, 1.0f, 1.0f, 1.0f,  // top-left
-1.0f, -1.0f, 1.0f, 0.0f, -1.0f, 0.0f, 1.0f, 0.0f, 1.0f,   // bottom-left
-1.0f, -1.0f, 1.0f, 0.0f, -1.0f, 0.0f, 1.0f, 0.0f, 1.0f,   // bottom-left
--1.0f, -1.0f, 1.0f, 0.0f, -1.0f, 0.0f, 0.0f, 0.0f, 1.0f,  // bottom-right
--1.0f, -1.0f, -1.0f, 0.0f, -1.0f, 0.0f, 0.0f, 1.0f, 1.0f, // top-right
-// top face
--1.0f, 1.0f, -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, 1.0f, // top-left
-1.0f, 1.0f, 1.0f, 0.0f, 1.0f, 0.0f, 1.0f, 0.0f, 1.0f,   // bottom-right
-1.0f, 1.0f, -1.0f, 0.0f, 1.0f, 0.0f, 1.0f, 1.0f, 1.0f,  // top-right
-1.0f, 1.0f, 1.0f, 0.0f, 1.0f, 0.0f, 1.0f, 0.0f, 1.0f,   // bottom-right
--1.0f, 1.0f, -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, 1.0f, // top-left
--1.0f, 1.0f, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f   // bottom-left
-        };
-        glGenVertexArrays(1, &cubeVAO);
-        glGenBuffers(1, &cubeVBO);
-        // fill buffer
-        glBindBuffer(GL_ARRAY_BUFFER, cubeVBO);
-        glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
-        // link vertex attributes
-        glBindVertexArray(cubeVAO);
-        glEnableVertexAttribArray(0);
-        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 9 * sizeof(float), (void*)0);
-        glEnableVertexAttribArray(1);
-        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 9 * sizeof(float), (void*)(3 * sizeof(float)));
-        glEnableVertexAttribArray(2);
-        glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, 9 * sizeof(float), (void*)(6 * sizeof(float)));
-        glBindBuffer(GL_ARRAY_BUFFER, 0);
-        glBindVertexArray(0);
-    }
-    // render Cube
-    glBindVertexArray(cubeVAO);
-    glDrawArrays(GL_TRIANGLES, 0, 36);
-    glBindVertexArray(0);
-    GLenum err;
-    while ((err = glGetError()) != GL_NO_ERROR)
-    {
-        std::cerr << "OpenGL Error: " << err << std::endl;
-    }
+
+
+std::pair<float, float> pixelsToDegrees(float px_x, float px_y) {
+
+    float x_mm = ((px_x - SCR_WIDTH / 2.0f) / SCR_WIDTH) * SCR_WIDTH_MM;
+    float y_mm = ((px_y - SCR_HEIGHT / 2.0f) / SCR_HEIGHT) * SCR_HEIGHT_MM;
+
+    float x_deg = atan2(x_mm, DIST_MM) * 180.0f / 3.1415;
+    float y_deg = atan2(y_mm, DIST_MM) * 180.0f / 3.1415;
+
+    return { x_deg, y_deg };
 }
 
-void createTexture(GLuint& glid)
-{
-    if (glid)
-    {
-        glDeleteTextures(1, &glid);
-    }
-    glGenTextures(1, &glid);
+std::pair<float, float> pixelsToDegreesFromNormalized(float norm_x, float norm_y) {
+    float px_x = norm_x * SCR_WIDTH;
+    float px_y = norm_y * SCR_HEIGHT;
+
+    float cx = SCR_WIDTH / 2.0f;
+    float cy = SCR_HEIGHT / 2.0f;
+
+    float px_per_mm_x = SCR_WIDTH / SCR_WIDTH_MM;
+    float px_per_mm_y = SCR_HEIGHT / SCR_HEIGHT_MM;
+
+    float dx_mm = (px_x - cx) / px_per_mm_x;
+    float dy_mm = (px_y - cy) / px_per_mm_y;
+
+    float deg_x = std::atan(dx_mm / DIST_MM) * (180.0f / static_cast<float>(3.1415));
+    float deg_y = std::atan(dy_mm / DIST_MM) * (180.0f / static_cast<float>(3.1415));
+
+    return { deg_x, deg_y };
 }
