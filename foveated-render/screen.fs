@@ -37,9 +37,4 @@ void main() {
         if (predicted_dist <0.001)
             FragColor = vec4(1.0, 1.0, 1.0, 1.0);
     }
-
-
-
-
-
 }

@@ -1,9 +1,6 @@
-#pragma once
 #include <glad/glad.h>
-
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
-#include "stb_image.h"
 #include <assimp/Importer.hpp>
 #include <assimp/scene.h>
 #include <assimp/postprocess.h>
@@ -39,23 +36,18 @@ public:
 private:
     void loadModel(std::string const& path)
     {
-        std::string sanitizedPath = path;
-        std::replace(sanitizedPath.begin(), sanitizedPath.end(), '\\', '/');
-
         Assimp::Importer importer;
-        const aiScene* scene = importer.ReadFile(sanitizedPath,
-            aiProcess_Triangulate | aiProcess_GenSmoothNormals | aiProcess_FlipUVs | aiProcess_CalcTangentSpace);
+        const aiScene* scene = importer.ReadFile(path, aiProcess_Triangulate | aiProcess_GenSmoothNormals | aiProcess_FlipUVs | aiProcess_CalcTangentSpace);
 
         if (!scene || scene->mFlags & AI_SCENE_FLAGS_INCOMPLETE || !scene->mRootNode)
         {
             std::cout << "ERROR::ASSIMP::" << importer.GetErrorString() << std::endl;
             return;
         }
+        directory = path.substr(0, path.find_last_of('/'));
 
-        directory = sanitizedPath.substr(0, sanitizedPath.find_last_of('/'));
         processNode(scene->mRootNode, scene);
     }
-
     void processNode(aiNode* node, const aiScene* scene)
     {
         for (unsigned int i = 0; i < node->mNumMeshes; i++)
@@ -75,6 +67,9 @@ private:
         std::vector<Vertex> vertices;
         std::vector<unsigned int> indices;
         std::vector<Texture> textures;
+
+        glm::vec3 diffuseColor(1.0f, 1.0f, 1.0f);  // default fallback diffuse
+        glm::vec3 specularColor(1.0f, 1.0f, 1.0f); // default fallback specular
 
         for (unsigned int i = 0; i < mesh->mNumVertices; i++)
         {
@@ -143,8 +138,28 @@ private:
             // height map
             std::vector<Texture> heightMaps = loadMaterialTextures(material, aiTextureType_AMBIENT, "texture_height");
             textures.insert(textures.end(), heightMaps.begin(), heightMaps.end());
+
+            if (diffuseMaps.empty())
+            {
+                aiColor3D color(0.f, 0.f, 0.f);
+                if (material->Get(AI_MATKEY_COLOR_DIFFUSE, color) == AI_SUCCESS)
+                {
+                    diffuseColor = glm::vec3(color.r, color.g, color.b);
+                }
+            }
+
+            // If no specular texture, get specular color from material
+            if (specularMaps.empty())
+            {
+                aiColor3D color(0.f, 0.f, 0.f);
+                if (material->Get(AI_MATKEY_COLOR_SPECULAR, color) == AI_SUCCESS)
+                {
+                    specularColor = glm::vec3(color.r, color.g, color.b);
+                }
+            }
         }
-        return Mesh(vertices, indices, textures, shininess);
+
+        return Mesh(vertices, indices, textures, shininess, diffuseColor, specularColor);
     }
     std::vector<Texture> loadMaterialTextures(aiMaterial* mat, aiTextureType type, std::string typeName)
     {
