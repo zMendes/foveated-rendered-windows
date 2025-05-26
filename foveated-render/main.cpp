@@ -34,7 +34,6 @@ void mouse_button_callback(GLFWwindow* window, int button, int action, int mods)
 FBO createFBO(int width, int height);
 void renderScene(Shader& shader, Model model);
 glm::vec2 gazeAngleToNorm(float predicted_x_deg, float predicted_y_deg);
-std::pair<float, float> pixelsToDegrees(float px_x, float px_y);
 std::pair<float, float> pixelsToDegreesFromNormalized(float norm_x, float norm_y);
 
 // settings
@@ -59,6 +58,9 @@ float lastFrame = 0.0f;
 
 bool showShading = false;
 bool isCursorEnabled = false;
+bool isSaccade = false;
+bool isLastSaccade = false;
+
 
 using namespace TobiiGameIntegration;
 
@@ -68,7 +70,6 @@ int main()
     //Eye tracking data
     ITobiiGameIntegrationApi* api = GetApi("Gaze Sample");
     IStreamsProvider* streamsProvider = api->GetStreamsProvider();
-    std::cout << "Stream Provider " << streamsProvider;
 
     api->GetTrackerController()->TrackRectangle({ 0,0,2560,1440 });
     GazePoint gazePoint;
@@ -76,24 +77,28 @@ int main()
     std::deque<std::array<float, 2>> gaze_history;
 
     glm::vec2 predicted;
+    std::pair<float, float> predicted_deg;
 
     Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "saccade_predictor");
-
-    // Create session options
     Ort::SessionOptions session_options;
     session_options.SetIntraOpNumThreads(1);
+    Ort::MemoryInfo memory_info = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+    std::array<int64_t, 3> input_shape = { 1, 10, 2 };
+    const char* input_names[] = { "input" };
+    const char* output_names[] = { "output" };
 
     // Load the model
     const wchar_t* model_path = L"C:/Users/leonardomm8/Documents/saccade_predictor.onnx";
     Ort::Session session(env, model_path, session_options);
-
-    std::cout << "Model loaded successfully!" << std::endl;
 
     // glfw: initialize and configure
     glfwInit();
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 6);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+
+    std::ofstream output_file("gaze_history.txt");
+
 
     // glfw window creation
     GLFWwindow* window = glfwCreateWindow(SCR_WIDTH, SCR_HEIGHT, "Foveated render", NULL, NULL);
@@ -171,71 +176,72 @@ int main()
         glm::vec3(135.0f, 60.0f, 37.0f),
         glm::vec3(135.0f, 60.0f, -81.0f) };
 
+
+    int count = 0;
+
     while (!glfwWindowShouldClose(window))
     {
 
+        //get eye data
         api->Update();
-
         streamsProvider->GetLatestGazePoint(gazePoint);
 
+        //dt
         float currentFrame = glfwGetTime();
         deltaTime = currentFrame - lastFrame;
         lastFrame = currentFrame;
-
+        
+        //input
         processInput(window);
 
-        auto [gaze_deg_x, gaze_deg_y] = pixelsToDegreesFromNormalized(gazePoint.X, gazePoint.Y);//posX, posY);
-        std::cout << "Gaze point (px):" << (gazePoint.X + 1)/2.0 << " - " << (gazePoint.Y +1.0)/2.0 << std::endl;
-        std::cout << "True Gaze (dva): " << gaze_deg_x << " - " << gaze_deg_y << std::endl;
-        gaze_history.push_back({ gaze_deg_x, gaze_deg_y });
-        if (gaze_history.size() > 10)
-            gaze_history.pop_front();
 
-        // Infer only if we have 10 points
-        if (gaze_history.size() == 10)
-        {
-            // Prepare input tensor data
-            std::vector<float> input_tensor_values;
-            for (const auto& pt : gaze_history)
-            {
-                input_tensor_values.push_back(pt[0]); // x
-                input_tensor_values.push_back(pt[1]); // y
+        //pred?
+        auto [gaze_deg_x, gaze_deg_y] = pixelsToDegreesFromNormalized(gazePoint.X, gazePoint.Y);
+        gaze_history.push_back({ gaze_deg_x, gaze_deg_y });
+        if (gaze_history.size() > 10) gaze_history.pop_front();
+
+        if (gaze_history.size() == 10) {
+            auto& prev = gaze_history[gaze_history.size() - 2];
+            auto& curr = gaze_history.back();
+
+            float dx = curr[0] - prev[0];
+            float dy = curr[1] - prev[1];
+            float velocity = std::sqrt(dx * dx + dy * dy) / deltaTime;
+
+            const float SACCADE_THRESHOLD = 30.0f;
+            isLastSaccade = isSaccade;
+            isSaccade = velocity > SACCADE_THRESHOLD;
+
+            if (!isSaccade && isLastSaccade) {
+                float error = std::hypot(predicted_deg.first - gaze_deg_x, predicted_deg.second - gaze_deg_y);
+                //std::cout << "Count: " << count << "\nError: " << error << std::endl;
+                if (output_file.is_open())
+                    output_file << gaze_deg_x << " " << gaze_deg_y << "," << predicted_deg.first << " " << predicted_deg.second << "\n";
+                count = 0;
             }
 
-            // Define input shape: [1, 10, 2]
-            std::array<int64_t, 3> input_shape = { 1, 10, 2 };
+            if (isSaccade) {
+                count++;
+                std::vector<float> input_tensor_values;
+                for (const auto& pt : gaze_history) {
+                    input_tensor_values.push_back(pt[0]);
+                    input_tensor_values.push_back(pt[1]);
+                }
 
-            Ort::MemoryInfo memory_info = Ort::MemoryInfo::CreateCpu(
-                OrtArenaAllocator, OrtMemTypeDefault);
+                Ort::Value input_tensor = Ort::Value::CreateTensor<float>(memory_info, input_tensor_values.data(),
+                    input_tensor_values.size(), input_shape.data(), input_shape.size());
 
-            Ort::Value input_tensor = Ort::Value::CreateTensor<float>(
-                memory_info, input_tensor_values.data(), input_tensor_values.size(),
-                input_shape.data(), input_shape.size());
+                auto output_tensors = session.Run(Ort::RunOptions{ nullptr },
+                    input_names, &input_tensor, 1,
+                    output_names, 1);
 
-            // Prepare input & output names
-            const char* input_names[] = { "input" };   // Use your actual input name
-            const char* output_names[] = { "output" }; // Use your actual output name
-
-            auto output_tensors = session.Run(Ort::RunOptions{ nullptr },
-                input_names, &input_tensor, 1,
-                output_names, 1);
-
-            // Read output: should be shape [1, 2]
-            float* output = output_tensors.front().GetTensorMutableData<float>();
-            float predicted_x = output[0];
-            float predicted_y = output[1];
-
-            predicted = gazeAngleToNorm(predicted_x, predicted_y);
-            std::cout << "Predicted landing (DVA): " << (predicted_x) << " " << (predicted_y) << std::endl;
-            std::cout << "Predicted landing (px): " << (predicted[0])  << " " << (predicted[1])<< std::endl;
+                float* output = output_tensors.front().GetTensorMutableData<float>();
+                predicted_deg = { output[0], output[1] };
+                predicted = gazeAngleToNorm(predicted_deg.first, predicted_deg.second);
+            }
         }
 
-        // ImGui_ImplOpenGL3_NewFrame();
-        // ImGui_ImplGlfw_NewFrame();
-        // ImGui::NewFrame();
-
         glm::mat4 view = camera.GetViewMatrix();
-        // projection matrix
         glm::mat4 projection = glm::perspective(glm::radians(camera.Zoom), (float)SCR_WIDTH / (float)SCR_HEIGHT, 0.1f, 10000.0f);
 
         // conference
@@ -244,34 +250,31 @@ int main()
         model = glm::scale(model, glm::vec3(.1f, .1f, .1f));
 
         shader.use();
-
         shader.setMat4("view", view);
         shader.setVec3("viewPos", camera.Position);
         shader.setMat4("projection", projection);
         // directional light
         shader.setVec3("dirLight.direction", -0.2f, 10.0f, -0.3f);
         shader.setVec3("dirLight.ambient", 0.2f, 0.2f, 0.2f);
-        // directional light
-        shader.setVec3("dirLight.diffuse", 0.4f, 0.4f, 0.4f);  // from 0.4 to 1
-        shader.setVec3("dirLight.specular", 0.5f, 0.5f, 0.5f); // from 0.5 to 1
-        // point lights — increase diffuse and specular intensity
+        shader.setVec3("dirLight.diffuse", 0.4f, 0.4f, 0.4f);  
+        shader.setVec3("dirLight.specular", 0.5f, 0.5f, 0.5f);
         for (int i = 0; i < 4; i++)
         {
-            shader.setVec3("pointLights[" + std::to_string(i) + "].diffuse", 1.0f, 1.0f, 1.0f); // from 0.8 to 1.0
+            shader.setVec3("pointLights[" + std::to_string(i) + "].diffuse", 1.0f, 1.0f, 1.0f); 
             shader.setVec3("pointLights[" + std::to_string(i) + "].specular", 1.0f, 1.0f, 1.0f);
         }
 
-        shader.setVec3("dirLight.ambient", 0.3f, 0.3f, 0.3f); // from 0.2 to 0.3
+        shader.setVec3("dirLight.ambient", 0.3f, 0.3f, 0.3f); 
         for (int i = 0; i < 4; i++)
         {
-            shader.setVec3("pointLights[" + std::to_string(i) + "].ambient", 0.3f, 0.3f, 0.3f); // from 0.2 to 0.3
+            shader.setVec3("pointLights[" + std::to_string(i) + "].ambient", 0.3f, 0.3f, 0.3f); 
         }
 
         for (int i = 0; i < 4; i++)
         {
             shader.setFloat("pointLights[" + std::to_string(i) + "].constant", 1.0f);
-            shader.setFloat("pointLights[" + std::to_string(i) + "].linear", 0.007f);     // from 0.09f to 0.07f (less decay)
-            shader.setFloat("pointLights[" + std::to_string(i) + "].quadratic", 0.0017f); // from 0.032f to 0.017f (less decay)
+            shader.setFloat("pointLights[" + std::to_string(i) + "].linear", 0.007f);     
+            shader.setFloat("pointLights[" + std::to_string(i) + "].quadratic", 0.0017f); 
         }
 
         shader.setVec3("pointLights[0].position", pointLightPositions[0]);
@@ -310,6 +313,7 @@ int main()
 
         screenShader.setVec2("gaze", glm::vec2(gazePoint.X, gazePoint.Y));//* 2 - 1));
         screenShader.setBool("showShading", showShading);
+        screenShader.setBool("isSaccade", isSaccade);
         screenShader.setVec2("predicted", predicted);
 
         glActiveTexture(GL_TEXTURE0);
@@ -334,6 +338,7 @@ int main()
         glfwPollEvents();
     }
 
+    output_file.close();
     glfwTerminate();
     return 0;
 }
@@ -474,18 +479,6 @@ glm::vec2 gazeAngleToNorm(float predicted_x_deg, float predicted_y_deg)
     return glm::vec2(norm_x, norm_y);
 }
 
-std::pair<float, float> pixelsToDegrees(float px_x, float px_y)
-{
-
-    float x_mm = ((px_x - SCR_WIDTH / 2.0f) / SCR_WIDTH) * SCR_WIDTH_MM;
-    float y_mm = ((px_y - SCR_HEIGHT / 2.0f) / SCR_HEIGHT) * SCR_HEIGHT_MM;
-
-    float x_deg = atan2(x_mm, DIST_MM) * 180.0f / 3.1415;
-    float y_deg = atan2(y_mm, DIST_MM) * 180.0f / 3.1415;
-
-    return { x_deg, y_deg };
-}
-
 std::pair<float, float> pixelsToDegreesFromNormalized(float norm_x, float norm_y)
 {
     float px_x = norm_x * SCR_WIDTH / 2.0;
@@ -502,3 +495,4 @@ std::pair<float, float> pixelsToDegreesFromNormalized(float norm_x, float norm_y
 
     return { deg_x, deg_y };
 }
+
