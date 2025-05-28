@@ -26,6 +26,57 @@ typedef struct
     unsigned int rbo;
 } FBO;
 
+#define GL_SHADING_RATE_IMAGE_NV 0x9563
+#define GL_SHADING_RATE_IMAGE_PER_PRIMITIVE_NV 0x95B1
+#define GL_SHADING_RATE_IMAGE_TEXEL_WIDTH_NV 0x955C
+#define GL_SHADING_RATE_IMAGE_TEXEL_HEIGHT_NV 0x955D
+#define GL_SHADING_RATE_IMAGE_PALETTE_SIZE_NV 0x955E
+#define GL_SHADING_RATE_NO_INVOCATIONS_NV 0x9564
+#define GL_SHADING_RATE_1_INVOCATION_PER_PIXEL_NV 0x9565
+#define GL_SHADING_RATE_IMAGE_PALETTE_SIZE_NV 0x955E
+#define GL_SHADING_RATE_1_INVOCATION_PER_2X2_PIXELS_NV 0x9568
+#define GL_SHADING_RATE_1_INVOCATION_PER_4X4_PIXELS_NV 0x956B
+
+typedef void(APIENTRYP PFNGLBINDSHADINGRATEIMAGENVPROC)(GLuint texture);
+PFNGLBINDSHADINGRATEIMAGENVPROC glBindShadingRateImageNV = nullptr;
+
+typedef void(APIENTRYP PFNGLSHADINGRATEIMAGEPALETTENVPROC)(GLuint viewport, GLuint first, GLsizei count, const GLenum* rates);
+PFNGLSHADINGRATEIMAGEPALETTENVPROC glShadingRateImagePaletteNV = nullptr;
+
+template <typename T>
+bool LoadGLFunction(T& funcPtr, const char* name) {
+    funcPtr = reinterpret_cast<T>(glfwGetProcAddress(name));
+    if (!funcPtr) {
+        std::cerr << "Failed to load " << name << "!" << std::endl;
+        return false;
+    }
+    else {
+        std::cout << "Successfully loaded " << name << "!" << std::endl;
+        return true;
+    }
+}
+
+bool InitNVShadingRateImageExtensions() {
+    bool allLoaded = true;
+
+    allLoaded &= LoadGLFunction(glBindShadingRateImageNV, "glBindShadingRateImageNV");
+    allLoaded &= LoadGLFunction(glShadingRateImagePaletteNV, "glShadingRateImagePaletteNV");
+
+
+    if (!glfwExtensionSupported("GL_NV_shading_rate_image")) {
+        std::cout << "GL_NV_shading_rate_image not supported!" << std::endl;
+        allLoaded = false;
+    }
+    if (!glfwExtensionSupported("GL_NV_primitive_shading_rate")) {
+        std::cout << "GL_NV_primitive_shading_rate not supported!" << std::endl;
+        allLoaded = false;
+    }
+
+    return allLoaded;
+}
+
+
+
 void framebuffer_size_callback(GLFWwindow* window, int width, int height);
 void processInput(GLFWwindow* window);
 void mouse_callback(GLFWwindow* window, double xpos, double ypos);
@@ -35,8 +86,10 @@ FBO createFBO(int width, int height);
 void renderScene(Shader& shader, Model model);
 glm::vec2 gazeAngleToNorm(float predicted_x_deg, float predicted_y_deg);
 std::pair<float, float> pixelsToDegreesFromNormalized(float norm_x, float norm_y);
-glm::mat4 perspectiveOffCenter(float left, float right, float bottom, float top, float near, float far);
-glm::mat4 getProjection(float x, float y, float radius, float multi);
+void createFoveationTexture(glm::vec2 point, bool isSaccade);
+void uploadFoveationDataToTexture(GLuint texture);
+void setupShadingRatePalette();
+void createTexture(GLuint& glid);
 
 // settings
 const unsigned int SCR_WIDTH = 1920;
@@ -51,17 +104,19 @@ float DIST_MM = 800.0f;
 float ASPECT_RATIO = (float)SCR_WIDTH / (float)SCR_HEIGHT;
 float near = 0.1f;
 float far = 10000.0f;
-float innerRadius = 0.2f;
-float middleRadius = 0.5f;
-
-int innerWidth = 2 * innerRadius * SCR_WIDTH;
-int innerHeight = 2 * innerRadius * SCR_HEIGHT;
-
-int mediumWidth = 2 * middleRadius * SCR_WIDTH / 2;
-int mediumHeight = 2 * middleRadius * SCR_HEIGHT / 2;
+float INNER_R = 0.2f;
+float MIDDLE_R = 0.5f;
 
 float posX = 0.5;
 float posY = 0.5;
+
+// VRS stuff
+GLuint fov_texture;
+std::vector<uint8_t> m_shadingRateImageData;
+uint32_t m_shadingRateImageWidth = 0;
+uint32_t m_shadingRateImageHeight = 0;
+GLint m_shadingRateImageTexelWidth;
+GLint m_shadingRateImageTexelHeight;
 
 // CAMERA
 Camera camera(glm::vec3(0.0f, 2.0f, 8.0f), glm::vec3(0.0f, 1.0f, 0.0f), -90.0f, 0.0f);
@@ -82,20 +137,27 @@ using namespace TobiiGameIntegration;
 
 int main()
 {
-    std::cout << "nice" << std::endl;
     //Eye tracking data
     ITobiiGameIntegrationApi* api = GetApi("Gaze Sample");
     IStreamsProvider* streamsProvider = api->GetStreamsProvider();
+    ITrackerController* trackerController = api->GetTrackerController();
 
     api->GetTrackerController()->TrackRectangle({ 0,0,SCR_WIDTH,SCR_HEIGHT });
     GazePoint gazePoint;
-    std::cout << "nice" << std::endl;
+    TrackerInfo info;
+    bool success = trackerController->GetTrackerInfo(info);
+
+    if (success) {
+        std::cout << "=== Tobii Eye Tracker Info ===" << std::endl;
+
+        std::cout << "Model: " << info.ModelName << std::endl;
+    } else {
+        std::cerr << "Failed to retrieve tracker info." << std::endl;
+    }
 
     std::deque<std::array<float, 2>> gaze_history;
-
     glm::vec2 predicted;
     std::pair<float, float> predicted_deg;
-    std::cout << "nice" << std::endl;
 
     Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "saccade_predictor");
     Ort::SessionOptions session_options;
@@ -104,12 +166,10 @@ int main()
     std::array<int64_t, 3> input_shape = { 1, 10, 2 };
     const char* input_names[] = { "input" };
     const char* output_names[] = { "output" };
-    std::cout << "nice" << std::endl;
 
     // Load the model
     const wchar_t* model_path = L"C:/Users/loenardomm8/Documents/saccade_predictor.onnx";
     Ort::Session session(env, model_path, session_options);
-    std::cout << "nice" << std::endl;
 
     // glfw: initialize and configure
     glfwInit();
@@ -117,7 +177,6 @@ int main()
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 6);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
 
-    std::ofstream output_file("gaze_history.txt");
 
 
     // glfw window creation
@@ -139,6 +198,10 @@ int main()
     glfwSetScrollCallback(window, scroll_callback);
 
 
+    if (!InitNVShadingRateImageExtensions()) {
+        std::cerr << "Failed to initialize required NV shading rate extensions!" << std::endl;
+    }
+
     if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress))
     {
         std::cout << "Failed to initialize GLAD" << std::endl;
@@ -147,12 +210,24 @@ int main()
 
     // OPENGL STATE
     glEnable(GL_DEPTH_TEST);
+    glEnable(GL_SHADING_RATE_IMAGE_NV);
+
+
+    glGetIntegerv(GL_SHADING_RATE_IMAGE_TEXEL_HEIGHT_NV, &m_shadingRateImageTexelHeight);
+    glGetIntegerv(GL_SHADING_RATE_IMAGE_TEXEL_WIDTH_NV, &m_shadingRateImageTexelWidth);
+
+    m_shadingRateImageWidth = (SCR_WIDTH + m_shadingRateImageTexelWidth - 1) / m_shadingRateImageTexelWidth;
+    m_shadingRateImageHeight = (SCR_HEIGHT + m_shadingRateImageTexelHeight - 1) / m_shadingRateImageTexelHeight;
+    m_shadingRateImageData.resize(m_shadingRateImageWidth * m_shadingRateImageHeight);
+
+    createTexture(fov_texture);
+    setupShadingRatePalette();
 
     Shader shader("vrs.vs", "vrs.fs");
     Shader screenShader("screen.vs", "screen.fs");
     shader.use();
 
-    std::string path = "C:\\Users\\loenardomm8\\Documents\\conference\\conference.obj";
+    std::string path = "C:\\Users\\loenardomm8\\Documents\\sponza\\sponza.obj";
 
     Model conference(path);
 
@@ -183,9 +258,7 @@ int main()
     glEnableVertexAttribArray(1);
     glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)(2 * sizeof(float)));
 
-    FBO fboHigh = createFBO(innerWidth, innerHeight);
-    FBO fboMedium = createFBO(mediumWidth, mediumHeight);
-    FBO fboLow = createFBO(SCR_WIDTH / 4, SCR_HEIGHT / 4);
+    FBO fboHigh = createFBO(SCR_WIDTH, SCR_HEIGHT);
 
     glm::vec3 pointLightPositions[] = {
         glm::vec3(-47.7f, 58.2f, -78.0f),
@@ -196,10 +269,11 @@ int main()
 
     int count = 0;
 
+
     while (!glfwWindowShouldClose(window))
     {
         float fps = 1.0f / deltaTime;
-        std::cout << "FPS: " << fps << std::endl;
+        //std::cout << "FPS: " << fps << std::endl;
         
         //get eye data
         api->Update();
@@ -212,7 +286,6 @@ int main()
         
         //input
         processInput(window);
-
 
         //pred?
         auto [gaze_deg_x, gaze_deg_y] = pixelsToDegreesFromNormalized(gazePoint.X, gazePoint.Y);
@@ -233,9 +306,7 @@ int main()
 
             if (!isSaccade && isLastSaccade) {
                 float error = std::hypot(predicted_deg.first - gaze_deg_x, predicted_deg.second - gaze_deg_y);
-                //std::cout << "Count: " << count << "\nError: " << error << std::endl;
-                if (output_file.is_open())
-                    output_file << gaze_deg_x << " " << gaze_deg_y << "," << predicted_deg.first << " " << predicted_deg.second << "\n";
+                std::cout << "Count: " << count << "\nError: " << error << std::endl;
                 count = 0;
             }
 
@@ -257,10 +328,13 @@ int main()
                 float* output = output_tensors.front().GetTensorMutableData<float>();
                 predicted_deg = { output[0], output[1] };
                 predicted = gazeAngleToNorm(predicted_deg.first, predicted_deg.second);
+                createFoveationTexture(predicted, isSaccade);
             }
+            else
+                createFoveationTexture(glm::vec2((gazePoint.X+1.0)/2.0, (gazePoint.Y + 1.0) / 2.0), isSaccade);
+
         }
-        glm::mat4 innerProjection = getProjection(gazePoint.X, gazePoint.Y, innerRadius, 2.5f);
-        glm::mat4 mediumProjection = getProjection(gazePoint.X, gazePoint.Y, middleRadius, 0.0f);
+
         glm::mat4 view = camera.GetViewMatrix();
         glm::mat4 projection = glm::perspective(glm::radians(camera.Zoom), (float)SCR_WIDTH / (float)SCR_HEIGHT, 0.1f, 10000.0f);
 
@@ -270,6 +344,10 @@ int main()
         model = glm::scale(model, glm::vec3(.1f, .1f, .1f));
 
         shader.use();
+        glEnable(GL_SHADING_RATE_IMAGE_NV);
+        createTexture(fov_texture);
+        uploadFoveationDataToTexture(fov_texture);
+        glBindShadingRateImageNV(fov_texture);
         shader.setMat4("view", view);
         shader.setVec3("viewPos", camera.Position);
         shader.setMat4("projection", projection);
@@ -308,48 +386,20 @@ int main()
 
         // High-res FBO
         glBindFramebuffer(GL_FRAMEBUFFER, fboHigh.fbo);
-        glViewport(0, 0, innerWidth, innerHeight);
-        shader.setMat4("projection", innerProjection);
-        renderScene(shader, conference);
-
-        // Medium-res FBO
-        glBindFramebuffer(GL_FRAMEBUFFER, fboMedium.fbo);
-        glViewport(0, 0, mediumWidth, mediumHeight);
-        shader.setMat4("projection", mediumProjection);
-        renderScene(shader, conference);
-
-        // Low-res FBO
-        glBindFramebuffer(GL_FRAMEBUFFER, fboLow.fbo);
-        glViewport(0, 0, SCR_WIDTH / 4, SCR_HEIGHT / 4);
-        shader.setMat4("projection", projection);
+        glViewport(0, 0, SCR_WIDTH, SCR_HEIGHT);
+        shader.setBool("showShading", showShading);
         renderScene(shader, conference);
 
         glDisable(GL_DEPTH_TEST);
-
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
         glClear(GL_COLOR_BUFFER_BIT);
-
-        glViewport(0, 0, SCR_WIDTH, SCR_HEIGHT);
         screenShader.use();
         glBindVertexArray(quadVAO);
 
-        screenShader.setVec2("gaze", glm::vec2(gazePoint.X, gazePoint.Y));//* 2 - 1));
-        screenShader.setBool("showShading", showShading);
-        screenShader.setBool("isSaccade", isSaccade);
-        screenShader.setVec2("predicted", predicted);
-        screenShader.setFloat("innerR", innerRadius);
-
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, fboHigh.texture);
-        screenShader.setInt("texHigh", 0);
+        screenShader.setInt("screenTexture", 0);
 
-        glActiveTexture(GL_TEXTURE1);
-        glBindTexture(GL_TEXTURE_2D, fboMedium.texture);
-        screenShader.setInt("texMedium", 1);
-
-        glActiveTexture(GL_TEXTURE2);
-        glBindTexture(GL_TEXTURE_2D, fboLow.texture);
-        screenShader.setInt("texLow", 2);
         glDrawArrays(GL_TRIANGLES, 0, 6);
 
         while ((err = glGetError()) != GL_NO_ERROR)
@@ -361,7 +411,6 @@ int main()
         glfwPollEvents();
     }
 
-    output_file.close();
     glfwTerminate();
     return 0;
 }
@@ -519,39 +568,72 @@ std::pair<float, float> pixelsToDegreesFromNormalized(float norm_x, float norm_y
     return { deg_x, deg_y };
 }
 
-glm::mat4 perspectiveOffCenter(float left, float right, float bottom, float top, float near, float far)
+void createTexture(GLuint& glid)
 {
-    glm::mat4 proj(0.0f);
-    proj[0][0] = 2.0f * near / (right - left);
-    proj[1][1] = 2.0f * near / (top - bottom);
-    proj[2][0] = (right + left) / (right - left);
-    proj[2][1] = (top + bottom) / (top - bottom);
-    proj[2][2] = -(far + near) / (far - near);
-    proj[2][3] = -1.0f;
-    proj[3][2] = -(2.0f * far * near) / (far - near);
-    return proj;
+    if (glid)
+    {
+        glDeleteTextures(1, &glid);
+    }
+    glGenTextures(1, &glid);
 }
 
-glm::mat4 getProjection(float x, float y, float radius, float multi)
+void setupShadingRatePalette()
 {
-    float fovy = glm::radians(camera.Zoom);
-    float tanHalfFovy = tan(fovy / 2.0f);
+    GLint palSize;
+    glGetIntegerv(GL_SHADING_RATE_IMAGE_PALETTE_SIZE_NV, &palSize);
+    assert(palSize >= 4);
 
-    float scale = 2.0f * radius;
+    GLenum* palette = new GLenum[palSize];
 
-    float top = near * tanHalfFovy * scale;
-    float bottom = -top;
-    float right = top * ASPECT_RATIO;
-    float left = -right;
+    palette[0] = GL_SHADING_RATE_NO_INVOCATIONS_NV;
+    palette[1] = GL_SHADING_RATE_1_INVOCATION_PER_PIXEL_NV;
+    palette[2] = GL_SHADING_RATE_1_INVOCATION_PER_2X2_PIXELS_NV;
+    palette[3] = GL_SHADING_RATE_1_INVOCATION_PER_4X4_PIXELS_NV;
 
-    float offsetX = x;
-    float offsetY = y;
+    for (int i = 4; i < palSize; ++i)
+    {
+        palette[i] = GL_SHADING_RATE_1_INVOCATION_PER_PIXEL_NV;
+    }
 
-    float shiftX = multi * offsetX * ASPECT_RATIO * tanHalfFovy * scale;
-    float shiftY = multi * offsetY * tanHalfFovy * scale;
+    glShadingRateImagePaletteNV(0, 0, palSize, palette);
+    delete[] palette;
+}
 
-    return perspectiveOffCenter(
-        left + shiftX * near, right + shiftX * near,
-        bottom + shiftY * near, top + shiftY * near,
-        near, far);
+void createFoveationTexture(glm::vec2 point, bool isSaccade)
+{
+
+    float centerX = point[0];
+    float centerY = point[1];
+    const int width = m_shadingRateImageWidth;
+    const int height = m_shadingRateImageHeight;
+
+    for (int y = 0; y < height; ++y)
+    {
+        for (int x = 0; x < width; ++x)
+        {
+            float fx = x / (float)width;
+            float fy = y / (float)height;
+
+            float d = std::sqrt((fx - centerX) * (fx - centerX) + (fy - centerY) * (fy - centerY));
+            if (d < (INNER_R + INNER_R * isSaccade))
+            {
+                m_shadingRateImageData[x + y * width] = 1;
+            }
+            else if (d < (MIDDLE_R + MIDDLE_R * isSaccade))
+            {
+                m_shadingRateImageData[x + y * width] = 2;
+            }
+            else
+            {
+                m_shadingRateImageData[x + y * width] = 3;
+            }
+        }
+    }
+}
+
+void uploadFoveationDataToTexture(GLuint texture)
+{
+    glBindTexture(GL_TEXTURE_2D, texture);
+    glTexStorage2D(GL_TEXTURE_2D, 1, GL_R8UI, m_shadingRateImageWidth, m_shadingRateImageHeight);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, m_shadingRateImageWidth, m_shadingRateImageHeight, GL_RED_INTEGER, GL_UNSIGNED_BYTE, &m_shadingRateImageData[0]);
 }

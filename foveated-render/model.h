@@ -36,15 +36,19 @@ public:
 private:
     void loadModel(std::string const& path)
     {
+
+        std::string sanitizedPath = path;
+        std::replace(sanitizedPath.begin(), sanitizedPath.end(), '\\', '/');
+
         Assimp::Importer importer;
-        const aiScene* scene = importer.ReadFile(path, aiProcess_Triangulate | aiProcess_GenSmoothNormals | aiProcess_FlipUVs | aiProcess_CalcTangentSpace);
+        const aiScene* scene = importer.ReadFile(sanitizedPath, aiProcess_Triangulate | aiProcess_GenSmoothNormals | aiProcess_FlipUVs | aiProcess_CalcTangentSpace);
 
         if (!scene || scene->mFlags & AI_SCENE_FLAGS_INCOMPLETE || !scene->mRootNode)
         {
             std::cout << "ERROR::ASSIMP::" << importer.GetErrorString() << std::endl;
             return;
         }
-        directory = path.substr(0, path.find_last_of('/'));
+        directory = sanitizedPath.substr(0, sanitizedPath.find_last_of('/'));
 
         processNode(scene->mRootNode, scene);
     }
@@ -196,7 +200,7 @@ private:
 unsigned int TextureFromFile(const char* path, const std::string& directory)
 {
     std::string filename = std::string(path);
-    filename = directory + '/' + filename;
+    filename =  directory + '/' + filename;
 
     unsigned int textureID;
     glGenTextures(1, &textureID);
@@ -226,7 +230,7 @@ unsigned int TextureFromFile(const char* path, const std::string& directory)
     }
     else
     {
-        std::cout << "Texture failed to load at path: " << path << std::endl;
+        std::cout << "Texture failed to load at path: " << filename << std::endl;
         stbi_image_free(data);
     }
 
