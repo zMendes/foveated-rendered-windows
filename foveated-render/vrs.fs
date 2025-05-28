@@ -65,10 +65,7 @@ vec3 CalcDirLight(DirLight light, vec3 normal, vec3 viewDir) {
     vec3 reflectDir = reflect(-lightDir, normal);
     float spec = pow(max(dot(viewDir, reflectDir), 0.0), material.shininess);
 
-    // Use diffuse texture if available, else fallback diffuseColor
     vec3 baseDiffuse = material.hasDiffuseTexture ? vec3(texture(material.texture_diffuse1, texCoords)) : material.diffuseColor;
-
-    // Use specular texture if available, else fallback specularColor
     vec3 baseSpecular = material.hasSpecularTexture ? vec3(texture(material.texture_specular1, texCoords)) : material.specularColor;
 
     vec3 ambient = light.ambient * baseDiffuse;
@@ -86,10 +83,7 @@ vec3 CalcPointLight(PointLight light, vec3 normal, vec3 fragPos, vec3 viewDir) {
     float distance = length(light.position - fragPos);
     float attenuation = 1.0 / (light.constant + light.linear * distance + light.quadratic * (distance * distance));
 
-    // Use diffuse texture if available, else fallback diffuseColor
     vec3 baseDiffuse = material.hasDiffuseTexture ? vec3(texture(material.texture_diffuse1, texCoords)) : material.diffuseColor;
-
-    // Use specular texture if available, else fallback specularColor
     vec3 baseSpecular = material.hasSpecularTexture ? vec3(texture(material.texture_specular1, texCoords)) : material.specularColor;
 
     vec3 ambient = light.ambient * baseDiffuse;

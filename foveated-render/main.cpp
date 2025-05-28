@@ -35,6 +35,8 @@ FBO createFBO(int width, int height);
 void renderScene(Shader& shader, Model model);
 glm::vec2 gazeAngleToNorm(float predicted_x_deg, float predicted_y_deg);
 std::pair<float, float> pixelsToDegreesFromNormalized(float norm_x, float norm_y);
+glm::mat4 perspectiveOffCenter(float left, float right, float bottom, float top, float near, float far);
+glm::mat4 getProjection(float x, float y, float radius, float multi);
 
 // settings
 const unsigned int SCR_WIDTH = 2560;
@@ -42,7 +44,17 @@ const unsigned int SCR_HEIGHT = 1440;
 float SCR_WIDTH_MM = 382.0f;
 float SCR_HEIGHT_MM = 215.0f;
 float DIST_MM = 800.0f;
-float ASPECT_RATIO = SCR_WIDTH / SCR_HEIGHT;
+float ASPECT_RATIO = (float)SCR_WIDTH / (float)SCR_HEIGHT;
+float near = 0.1f;
+float far = 10000.0f;
+float innerRadius = 0.2f;
+float middleRadius = 0.5f;
+
+int innerWidth = 2 * innerRadius * SCR_WIDTH;
+int innerHeight = 2 * innerRadius * SCR_HEIGHT;
+
+int mediumWidth = 2 * middleRadius * SCR_WIDTH / 2;
+int mediumHeight = 2 * middleRadius * SCR_HEIGHT / 2;
 
 float posX = 0.5;
 float posY = 0.5;
@@ -110,6 +122,7 @@ int main()
     }
 
     glfwMakeContextCurrent(window);
+    glfwSwapInterval(0);
     glfwSetFramebufferSizeCallback(window, framebuffer_size_callback);
 
     glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_HIDDEN);
@@ -117,10 +130,6 @@ int main()
     glfwSetCursorPosCallback(window, mouse_callback);
     glfwSetScrollCallback(window, scroll_callback);
 
-    // IMGUI
-    // ImGui::CreateContext();
-    // ImGui_ImplGlfw_InitForOpenGL(window, true);
-    // ImGui_ImplOpenGL3_Init("#version 460 core");
 
     if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress))
     {
@@ -166,8 +175,8 @@ int main()
     glEnableVertexAttribArray(1);
     glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)(2 * sizeof(float)));
 
-    FBO fboHigh = createFBO(SCR_WIDTH, SCR_HEIGHT);
-    FBO fboMedium = createFBO(SCR_WIDTH / 2, SCR_HEIGHT / 2);
+    FBO fboHigh = createFBO(innerWidth, innerHeight);
+    FBO fboMedium = createFBO(mediumWidth, mediumHeight);
     FBO fboLow = createFBO(SCR_WIDTH / 4, SCR_HEIGHT / 4);
 
     glm::vec3 pointLightPositions[] = {
@@ -181,7 +190,9 @@ int main()
 
     while (!glfwWindowShouldClose(window))
     {
-
+        float fps = 1.0f / deltaTime;
+        std::cout << "FPS: " << fps << std::endl;
+        
         //get eye data
         api->Update();
         streamsProvider->GetLatestGazePoint(gazePoint);
@@ -240,7 +251,8 @@ int main()
                 predicted = gazeAngleToNorm(predicted_deg.first, predicted_deg.second);
             }
         }
-
+        glm::mat4 innerProjection = getProjection(gazePoint.X, gazePoint.Y, innerRadius, 2.5f);
+        glm::mat4 mediumProjection = getProjection(gazePoint.X, gazePoint.Y, middleRadius, 0.0f);
         glm::mat4 view = camera.GetViewMatrix();
         glm::mat4 projection = glm::perspective(glm::radians(camera.Zoom), (float)SCR_WIDTH / (float)SCR_HEIGHT, 0.1f, 10000.0f);
 
@@ -283,23 +295,25 @@ int main()
         shader.setVec3("pointLights[2].position", pointLightPositions[2]);
         shader.setVec3("pointLights[3].position", pointLightPositions[3]);
         shader.setMat4("view", view);
-        shader.setMat4("projection", projection);
         shader.setMat4("model", model);
         shader.setVec3("viewPos", camera.Position);
 
         // High-res FBO
         glBindFramebuffer(GL_FRAMEBUFFER, fboHigh.fbo);
-        glViewport(0, 0, SCR_WIDTH, SCR_HEIGHT);
+        glViewport(0, 0, innerWidth, innerHeight);
+        shader.setMat4("projection", innerProjection);
         renderScene(shader, conference);
 
         // Medium-res FBO
         glBindFramebuffer(GL_FRAMEBUFFER, fboMedium.fbo);
-        glViewport(0, 0, SCR_WIDTH / 2, SCR_HEIGHT / 2);
+        glViewport(0, 0, mediumWidth, mediumHeight);
+        shader.setMat4("projection", mediumProjection);
         renderScene(shader, conference);
 
         // Low-res FBO
         glBindFramebuffer(GL_FRAMEBUFFER, fboLow.fbo);
         glViewport(0, 0, SCR_WIDTH / 4, SCR_HEIGHT / 4);
+        shader.setMat4("projection", projection);
         renderScene(shader, conference);
 
         glDisable(GL_DEPTH_TEST);
@@ -315,6 +329,7 @@ int main()
         screenShader.setBool("showShading", showShading);
         screenShader.setBool("isSaccade", isSaccade);
         screenShader.setVec2("predicted", predicted);
+        screenShader.setFloat("innerR", innerRadius);
 
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, fboHigh.texture);
@@ -496,3 +511,39 @@ std::pair<float, float> pixelsToDegreesFromNormalized(float norm_x, float norm_y
     return { deg_x, deg_y };
 }
 
+glm::mat4 perspectiveOffCenter(float left, float right, float bottom, float top, float near, float far)
+{
+    glm::mat4 proj(0.0f);
+    proj[0][0] = 2.0f * near / (right - left);
+    proj[1][1] = 2.0f * near / (top - bottom);
+    proj[2][0] = (right + left) / (right - left);
+    proj[2][1] = (top + bottom) / (top - bottom);
+    proj[2][2] = -(far + near) / (far - near);
+    proj[2][3] = -1.0f;
+    proj[3][2] = -(2.0f * far * near) / (far - near);
+    return proj;
+}
+
+glm::mat4 getProjection(float x, float y, float radius, float multi)
+{
+    float fovy = glm::radians(camera.Zoom);
+    float tanHalfFovy = tan(fovy / 2.0f);
+
+    float scale = 2.0f * radius;
+
+    float top = near * tanHalfFovy * scale;
+    float bottom = -top;
+    float right = top * ASPECT_RATIO;
+    float left = -right;
+
+    float offsetX = x;
+    float offsetY = y;
+
+    float shiftX = multi * offsetX * ASPECT_RATIO * tanHalfFovy * scale;
+    float shiftY = multi * offsetY * tanHalfFovy * scale;
+
+    return perspectiveOffCenter(
+        left + shiftX * near, right + shiftX * near,
+        bottom + shiftY * near, top + shiftY * near,
+        near, far);
+}

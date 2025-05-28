@@ -9,31 +9,33 @@ uniform sampler2D texLow;
 
 uniform vec2 gaze;
 uniform vec2 predicted;
-
 uniform bool showShading;
-uniform bool isSaccade;
+uniform float innerR;
 
 void main() {
-    vec2 gaze_center = isSaccade ? predicted : (gaze + 1.0) * 0.5;
-    float foveation = isSaccade ? 0.3 : 0.1;
-    float dist = distance(TexCoords, gaze_center);
+    vec2 gaze_norm = (gaze + 1.0)/2.0;
+    vec2 uvHigh = (TexCoords - (gaze_norm - vec2(innerR))) / (2.0 * innerR);
+    uvHigh = clamp(uvHigh, 0.0, 1.0);
 
-    if (dist < foveation)
-        FragColor = texture(texHigh, TexCoords);
+    float dist = distance(TexCoords, gaze_norm);
+
+    if (dist < 0.2)
+        FragColor = texture(texHigh, uvHigh);
     else if (dist < 0.5)
         FragColor = texture(texMedium, TexCoords);
     else
         FragColor = texture(texLow, TexCoords);
 
     if (showShading) {
-        vec4 shade = vec4(0.0, 1.0, 0.0, 1.0);
-        if (dist < foveation)
-            shade = vec4(1.0, 0.0, 0.0, 1.0);
-        else if (dist < 0.4)
-            shade = vec4(1.0, 1.0, 0.0, 1.0);
-        FragColor *= shade;
+        if (dist < 0.2)
+            FragColor *= vec4(1.0, 0.0, 0.0, 1.0);
+        else if (dist < 0.5)
+            FragColor *= vec4(1.0, 1.0, 0.0, 1.0);
+        else
+            FragColor *= vec4(0.0, 1.0, 0.0, 1.0);
 
-        if (distance(TexCoords, predicted) < 0.001)
-            FragColor = vec4(1.0);
+        float predicted_dist = distance(TexCoords, predicted);
+        if (predicted_dist < 0.001)
+            FragColor = vec4(1.0, 1.0, 1.0, 1.0);
     }
 }
