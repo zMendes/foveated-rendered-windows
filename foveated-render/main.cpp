@@ -1,4 +1,4 @@
-#include <glad/glad.h>
+﻿#include <glad/glad.h>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
@@ -39,10 +39,14 @@ glm::mat4 perspectiveOffCenter(float left, float right, float bottom, float top,
 glm::mat4 getProjection(float x, float y, float radius, float multi);
 
 // settings
-const unsigned int SCR_WIDTH = 2560;
-const unsigned int SCR_HEIGHT = 1440;
-float SCR_WIDTH_MM = 382.0f;
-float SCR_HEIGHT_MM = 215.0f;
+const unsigned int SCR_WIDTH = 1920;
+const unsigned int SCR_HEIGHT = 1080;
+float diagonal_in_inches = 17.0f;
+
+float diag_px = std::sqrt(SCR_WIDTH * SCR_WIDTH + SCR_HEIGHT * SCR_HEIGHT);
+float diag_mm = diagonal_in_inches * 25.4f;
+float SCR_WIDTH_MM = diag_mm * (SCR_WIDTH / diag_px);
+float SCR_HEIGHT_MM = diag_mm * (SCR_HEIGHT / diag_px);
 float DIST_MM = 800.0f;
 float ASPECT_RATIO = (float)SCR_WIDTH / (float)SCR_HEIGHT;
 float near = 0.1f;
@@ -78,18 +82,20 @@ using namespace TobiiGameIntegration;
 
 int main()
 {
-
+    std::cout << "nice" << std::endl;
     //Eye tracking data
     ITobiiGameIntegrationApi* api = GetApi("Gaze Sample");
     IStreamsProvider* streamsProvider = api->GetStreamsProvider();
 
-    api->GetTrackerController()->TrackRectangle({ 0,0,2560,1440 });
+    api->GetTrackerController()->TrackRectangle({ 0,0,SCR_WIDTH,SCR_HEIGHT });
     GazePoint gazePoint;
+    std::cout << "nice" << std::endl;
 
     std::deque<std::array<float, 2>> gaze_history;
 
     glm::vec2 predicted;
     std::pair<float, float> predicted_deg;
+    std::cout << "nice" << std::endl;
 
     Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "saccade_predictor");
     Ort::SessionOptions session_options;
@@ -98,10 +104,12 @@ int main()
     std::array<int64_t, 3> input_shape = { 1, 10, 2 };
     const char* input_names[] = { "input" };
     const char* output_names[] = { "output" };
+    std::cout << "nice" << std::endl;
 
     // Load the model
-    const wchar_t* model_path = L"C:/Users/leonardomm8/Documents/saccade_predictor.onnx";
+    const wchar_t* model_path = L"C:/Users/loenardomm8/Documents/saccade_predictor.onnx";
     Ort::Session session(env, model_path, session_options);
+    std::cout << "nice" << std::endl;
 
     // glfw: initialize and configure
     glfwInit();
@@ -144,7 +152,7 @@ int main()
     Shader screenShader("screen.vs", "screen.fs");
     shader.use();
 
-    std::string path = "C:\\Users\\leonardomm8\\Documents\\conference\\conference.obj";
+    std::string path = "C:\\Users\\loenardomm8\\Documents\\conference\\conference.obj";
 
     Model conference(path);
 

@@ -71,8 +71,8 @@
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
-    <LibraryPath>C:\Users\leonardomm8\Documents\onnxruntime-win-x64-gpu-1.17.3\onnxruntime-win-x64-gpu-1.17.3\lib;C:\Users\leonardomm8\Documents\tobii_gameintegration\lib;C:\Users\leonardomm8\Documents\Assimp\lib\x64;C:\Users\leonardomm8\Documents\glfw-3.4\lib-vc2022;$(LibraryPath)</LibraryPath>
-    <IncludePath>C:\Users\leonardomm8\Documents\onnxruntime-win-x64-gpu-1.17.3\onnxruntime-win-x64-gpu-1.17.3\include;C:\Users\leonardomm8\Documents\libtorch\libtorch\include;C:\Users\leonardomm8\Documents\tobii_gameintegration\include;C:\Users\leonardomm8\Documents\Assimp\include;C:\Users\leonardomm8\Documents\glm-1.0.1;C:\Users\leonardomm8\Documents\glfw-3.4\include;C:\Users\leonardomm8\Documents\glad\include;$(IncludePath)</IncludePath>
+    <LibraryPath>C:\Users\loenardomm8\Documents\onnxruntime-win-x64-gpu-1.17.3\lib;C:\Users\loenardomm8\Documents\tobii_gameintegration\lib;C:\Users\loenardomm8\Documents\Assimp\lib\x64;C:\Users\loenardomm8\Documents\glfw-3.4.bin.WIN64\lib-vc2022;$(LibraryPath)</LibraryPath>
+    <IncludePath>C:\Users\loenardomm8\Documents\onnxruntime-win-x64-gpu-1.17.3\include;C:\Users\loenardomm8\Documents\tobii_gameintegration\include;C:\Users\loenardomm8\Documents\Assimp\include;C:\Users\loenardomm8\Documents\glm;C:\Users\loenardomm8\Documents\glfw-3.4.bin.WIN64\include;C:\Users\loenardomm8\Documents\glad\include;$(IncludePath)</IncludePath>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <ClCompile>
