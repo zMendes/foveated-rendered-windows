@@ -11,6 +11,7 @@
 #include "camera.h"
 #include "stb_image.h"
 #include "model.h"
+#include "constants.h"
 
 #include <iostream>
 #include <algorithm>
@@ -18,6 +19,7 @@
 #include <deque>
 #include <cmath>
 #include <utility>
+#include <chrono>
 
 typedef struct
 {
@@ -26,56 +28,11 @@ typedef struct
     unsigned int rbo;
 } FBO;
 
-#define GL_SHADING_RATE_IMAGE_NV 0x9563
-#define GL_SHADING_RATE_IMAGE_PER_PRIMITIVE_NV 0x95B1
-#define GL_SHADING_RATE_IMAGE_TEXEL_WIDTH_NV 0x955C
-#define GL_SHADING_RATE_IMAGE_TEXEL_HEIGHT_NV 0x955D
-#define GL_SHADING_RATE_IMAGE_PALETTE_SIZE_NV 0x955E
-#define GL_SHADING_RATE_NO_INVOCATIONS_NV 0x9564
-#define GL_SHADING_RATE_1_INVOCATION_PER_PIXEL_NV 0x9565
-#define GL_SHADING_RATE_IMAGE_PALETTE_SIZE_NV 0x955E
-#define GL_SHADING_RATE_1_INVOCATION_PER_2X2_PIXELS_NV 0x9568
-#define GL_SHADING_RATE_1_INVOCATION_PER_4X4_PIXELS_NV 0x956B
-
 typedef void(APIENTRYP PFNGLBINDSHADINGRATEIMAGENVPROC)(GLuint texture);
 PFNGLBINDSHADINGRATEIMAGENVPROC glBindShadingRateImageNV = nullptr;
 
 typedef void(APIENTRYP PFNGLSHADINGRATEIMAGEPALETTENVPROC)(GLuint viewport, GLuint first, GLsizei count, const GLenum* rates);
 PFNGLSHADINGRATEIMAGEPALETTENVPROC glShadingRateImagePaletteNV = nullptr;
-
-template <typename T>
-bool LoadGLFunction(T& funcPtr, const char* name) {
-    funcPtr = reinterpret_cast<T>(glfwGetProcAddress(name));
-    if (!funcPtr) {
-        std::cerr << "Failed to load " << name << "!" << std::endl;
-        return false;
-    }
-    else {
-        std::cout << "Successfully loaded " << name << "!" << std::endl;
-        return true;
-    }
-}
-
-bool InitNVShadingRateImageExtensions() {
-    bool allLoaded = true;
-
-    allLoaded &= LoadGLFunction(glBindShadingRateImageNV, "glBindShadingRateImageNV");
-    allLoaded &= LoadGLFunction(glShadingRateImagePaletteNV, "glShadingRateImagePaletteNV");
-
-
-    if (!glfwExtensionSupported("GL_NV_shading_rate_image")) {
-        std::cout << "GL_NV_shading_rate_image not supported!" << std::endl;
-        allLoaded = false;
-    }
-    if (!glfwExtensionSupported("GL_NV_primitive_shading_rate")) {
-        std::cout << "GL_NV_primitive_shading_rate not supported!" << std::endl;
-        allLoaded = false;
-    }
-
-    return allLoaded;
-}
-
-
 
 void framebuffer_size_callback(GLFWwindow* window, int width, int height);
 void processInput(GLFWwindow* window);
@@ -84,13 +41,16 @@ void scroll_callback(GLFWwindow* window, double xoffset, double yoffset);
 void mouse_button_callback(GLFWwindow* window, int button, int action, int mods);
 FBO createFBO(int width, int height);
 void renderScene(Shader& shader, Model model);
-glm::vec2 gazeAngleToNorm(float predicted_x_deg, float predicted_y_deg);
+glm::vec2 gazeAngleToNorm(float x_deg, float y_deg);
 std::pair<float, float> pixelsToDegreesFromNormalized(float norm_x, float norm_y);
-void createFoveationTexture(glm::vec2 point, bool isSaccade);
+float angleToNormRadius(float deg, float diagInInches, float distMM, int scrWidth, int scrHeight);
+void createFoveationTexture(glm::vec2 point, float error);
 void uploadFoveationDataToTexture(GLuint texture);
 void setupShadingRatePalette();
 void createTexture(GLuint& glid);
-
+bool InitNVShadingRateImageExtensions();
+template <typename T>
+bool LoadGLFunction(T& funcPtr, const char* name);
 // settings
 const unsigned int SCR_WIDTH = 1920;
 const unsigned int SCR_HEIGHT = 1080;
@@ -100,12 +60,14 @@ float diag_px = std::sqrt(SCR_WIDTH * SCR_WIDTH + SCR_HEIGHT * SCR_HEIGHT);
 float diag_mm = diagonal_in_inches * 25.4f;
 float SCR_WIDTH_MM = diag_mm * (SCR_WIDTH / diag_px);
 float SCR_HEIGHT_MM = diag_mm * (SCR_HEIGHT / diag_px);
-float DIST_MM = 800.0f;
+float DIST_MM = 600.0f;
 float ASPECT_RATIO = (float)SCR_WIDTH / (float)SCR_HEIGHT;
 float near = 0.1f;
 float far = 10000.0f;
-float INNER_R = 0.2f;
-float MIDDLE_R = 0.5f;
+float INNER_R_DEG = 6.5f;
+float MIDDLE_R_DEG = 14.25f;
+float INNER_R = angleToNormRadius(INNER_R_DEG, diagonal_in_inches, DIST_MM, SCR_WIDTH, SCR_HEIGHT);
+float MIDDLE_R = angleToNormRadius(MIDDLE_R_DEG, diagonal_in_inches, DIST_MM, SCR_WIDTH, SCR_HEIGHT);
 
 float posX = 0.5;
 float posY = 0.5;
@@ -132,6 +94,8 @@ bool isCursorEnabled = false;
 bool isSaccade = false;
 bool isLastSaccade = false;
 
+float PRECISION_DEG = 1.01f; //https://link.springer.com/chapter/10.1007/978-3-030-98404-5_36
+float PRECISION = angleToNormRadius(PRECISION_DEG, diagonal_in_inches, DIST_MM, SCR_WIDTH, SCR_HEIGHT);
 
 using namespace TobiiGameIntegration;
 
@@ -143,7 +107,7 @@ int main()
     ITrackerController* trackerController = api->GetTrackerController();
 
     api->GetTrackerController()->TrackRectangle({ 0,0,SCR_WIDTH,SCR_HEIGHT });
-    GazePoint gazePoint;
+    const GazePoint* gazePoints = nullptr;
     TrackerInfo info;
     bool success = trackerController->GetTrackerInfo(info);
 
@@ -210,11 +174,11 @@ int main()
 
     // OPENGL STATE
     glEnable(GL_DEPTH_TEST);
-    glEnable(GL_SHADING_RATE_IMAGE_NV);
+    glEnable(NVShadingRate::IMAGE);
 
 
-    glGetIntegerv(GL_SHADING_RATE_IMAGE_TEXEL_HEIGHT_NV, &m_shadingRateImageTexelHeight);
-    glGetIntegerv(GL_SHADING_RATE_IMAGE_TEXEL_WIDTH_NV, &m_shadingRateImageTexelWidth);
+    glGetIntegerv(NVShadingRate::TEXEL_HEIGHT, &m_shadingRateImageTexelHeight);
+    glGetIntegerv(NVShadingRate::TEXEL_WIDTH, &m_shadingRateImageTexelWidth);
 
     m_shadingRateImageWidth = (SCR_WIDTH + m_shadingRateImageTexelWidth - 1) / m_shadingRateImageTexelWidth;
     m_shadingRateImageHeight = (SCR_HEIGHT + m_shadingRateImageTexelHeight - 1) / m_shadingRateImageTexelHeight;
@@ -268,123 +232,117 @@ int main()
 
 
     int count = 0;
-
+    const GazePoint* last = nullptr;
+    using clock = std::chrono::high_resolution_clock;
 
     while (!glfwWindowShouldClose(window))
     {
-        float fps = 1.0f / deltaTime;
-        //std::cout << "FPS: " << fps << std::endl;
-        
-        //get eye data
-        api->Update();
-        streamsProvider->GetLatestGazePoint(gazePoint);
-
-        //dt
-        float currentFrame = glfwGetTime();
-        deltaTime = currentFrame - lastFrame;
-        lastFrame = currentFrame;
-        
-        //input
         processInput(window);
 
-        //pred?
-        auto [gaze_deg_x, gaze_deg_y] = pixelsToDegreesFromNormalized(gazePoint.X, gazePoint.Y);
-        gaze_history.push_back({ gaze_deg_x, gaze_deg_y });
+        auto frame_start = clock::now();
+        float fps = 1.0f / deltaTime;
+        //std::cout << "FPS: " << fps << std::endl;
+
+        // ========== API UPDATE ==========
+        auto t0 = clock::now();
+        api->Update();
+        auto t1 = clock::now();
+
+        // ========== GET GAZE POINTS ==========
+        int count = streamsProvider->GetGazePoints(gazePoints);
+        auto t2 = clock::now();
+        if (gazePoints != nullptr) {
+            for (int i = 0; i < count; ++i) {
+                const GazePoint& point = gazePoints[i];
+                last = &gazePoints[i];
+                auto [gaze_deg_x, gaze_deg_y] = pixelsToDegreesFromNormalized(point.X, point.Y);
+                gaze_history.push_back({ gaze_deg_x, gaze_deg_y });
+            }
+        }
+
+        // ========== TIME PROCESSING AND INFERENCE ==========
+        auto t3 = clock::now();
         if (gaze_history.size() > 10) gaze_history.pop_front();
 
         if (gaze_history.size() == 10) {
             auto& prev = gaze_history[gaze_history.size() - 2];
             auto& curr = gaze_history.back();
 
-            float dx = curr[0] - prev[0];
-            float dy = curr[1] - prev[1];
-            float velocity = std::sqrt(dx * dx + dy * dy) / deltaTime;
+            float dx = predicted_deg.first - curr[0];
+            float dy = predicted_deg.second - curr[1];
+            float raw_error = std::sqrt(dx * dx + dy * dy);
+            float total_error = std::sqrt(raw_error * raw_error + PRECISION * PRECISION);
+            std::cout << total_error << std::endl;
 
-            const float SACCADE_THRESHOLD = 30.0f;
-            isLastSaccade = isSaccade;
-            isSaccade = velocity > SACCADE_THRESHOLD;
-
-            if (!isSaccade && isLastSaccade) {
-                float error = std::hypot(predicted_deg.first - gaze_deg_x, predicted_deg.second - gaze_deg_y);
-                std::cout << "Count: " << count << "\nError: " << error << std::endl;
-                count = 0;
+            std::vector<float> input_tensor_values;
+            for (const auto& pt : gaze_history) {
+                input_tensor_values.push_back(pt[0]);
+                input_tensor_values.push_back(pt[1]);
             }
 
-            if (isSaccade) {
-                count++;
-                std::vector<float> input_tensor_values;
-                for (const auto& pt : gaze_history) {
-                    input_tensor_values.push_back(pt[0]);
-                    input_tensor_values.push_back(pt[1]);
-                }
+            Ort::Value input_tensor = Ort::Value::CreateTensor<float>(memory_info, input_tensor_values.data(),
+                input_tensor_values.size(), input_shape.data(), input_shape.size());
 
-                Ort::Value input_tensor = Ort::Value::CreateTensor<float>(memory_info, input_tensor_values.data(),
-                    input_tensor_values.size(), input_shape.data(), input_shape.size());
+            auto output_tensors = session.Run(Ort::RunOptions{ nullptr },
+                input_names, &input_tensor, 1,
+                output_names, 1);
 
-                auto output_tensors = session.Run(Ort::RunOptions{ nullptr },
-                    input_names, &input_tensor, 1,
-                    output_names, 1);
-
-                float* output = output_tensors.front().GetTensorMutableData<float>();
-                predicted_deg = { output[0], output[1] };
-                predicted = gazeAngleToNorm(predicted_deg.first, predicted_deg.second);
-                createFoveationTexture(predicted, isSaccade);
-            }
-            else
-                createFoveationTexture(glm::vec2((gazePoint.X+1.0)/2.0, (gazePoint.Y + 1.0) / 2.0), isSaccade);
-
+            float* output = output_tensors.front().GetTensorMutableData<float>();
+            predicted_deg = { output[0], output[1] };
+            predicted = gazeAngleToNorm(predicted_deg.first, predicted_deg.second);
+            createFoveationTexture(predicted, total_error);
         }
+        auto t4 = clock::now();
 
+        // ========== RENDER PASS ==========
         glm::mat4 view = camera.GetViewMatrix();
         glm::mat4 projection = glm::perspective(glm::radians(camera.Zoom), (float)SCR_WIDTH / (float)SCR_HEIGHT, 0.1f, 10000.0f);
-
-        // conference
-        glm::mat4 model = glm::mat4(1.0f);
-        model = glm::translate(model, glm::vec3(0.0f, 0.f, 0.0f));
-        model = glm::scale(model, glm::vec3(.1f, .1f, .1f));
+        glm::mat4 model = glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, 0.f, 0.0f));
+        model = glm::scale(model, glm::vec3(.1f));
 
         shader.use();
-        glEnable(GL_SHADING_RATE_IMAGE_NV);
+        glEnable(NVShadingRate::IMAGE);
         createTexture(fov_texture);
         uploadFoveationDataToTexture(fov_texture);
         glBindShadingRateImageNV(fov_texture);
+
         shader.setMat4("view", view);
-        shader.setVec3("viewPos", camera.Position);
         shader.setMat4("projection", projection);
+        shader.setMat4("model", model);
+        shader.setVec3("viewPos", camera.Position);
         // directional light
-        shader.setVec3("dirLight.direction", -0.2f, 10.0f, -0.3f);
-        shader.setVec3("dirLight.ambient", 0.2f, 0.2f, 0.2f);
-        shader.setVec3("dirLight.diffuse", 0.4f, 0.4f, 0.4f);  
-        shader.setVec3("dirLight.specular", 0.5f, 0.5f, 0.5f);
-        for (int i = 0; i < 4; i++)
+        shader.setVec3("dirLight.direction", -0.2f, -10.0f, -0.3f);
+        shader.setVec3("dirLight.ambient", 0.4f, 0.4f, 0.4f);
+        shader.setVec3("dirLight.diffuse", 0.5f, 0.5f, 0.5f);
+        shader.setVec3("dirLight.specular", 0.7f, 0.7f, 0.7f);
+        /*for (int i = 0; i < 4; i++)
         {
-            shader.setVec3("pointLights[" + std::to_string(i) + "].diffuse", 1.0f, 1.0f, 1.0f); 
+            shader.setVec3("pointLights[" + std::to_string(i) + "].diffuse", 1.0f, 1.0f, 1.0f);
             shader.setVec3("pointLights[" + std::to_string(i) + "].specular", 1.0f, 1.0f, 1.0f);
         }
 
-        shader.setVec3("dirLight.ambient", 0.3f, 0.3f, 0.3f); 
+        shader.setVec3("dirLight.ambient", 0.3f, 0.3f, 0.3f);
         for (int i = 0; i < 4; i++)
         {
-            shader.setVec3("pointLights[" + std::to_string(i) + "].ambient", 0.3f, 0.3f, 0.3f); 
+            shader.setVec3("pointLights[" + std::to_string(i) + "].ambient", 0.3f, 0.3f, 0.3f);
         }
 
         for (int i = 0; i < 4; i++)
         {
             shader.setFloat("pointLights[" + std::to_string(i) + "].constant", 1.0f);
-            shader.setFloat("pointLights[" + std::to_string(i) + "].linear", 0.007f);     
-            shader.setFloat("pointLights[" + std::to_string(i) + "].quadratic", 0.0017f); 
+            shader.setFloat("pointLights[" + std::to_string(i) + "].linear", 0.007f);
+            shader.setFloat("pointLights[" + std::to_string(i) + "].quadratic", 0.0017f);
         }
 
         shader.setVec3("pointLights[0].position", pointLightPositions[0]);
         shader.setVec3("pointLights[1].position", pointLightPositions[1]);
         // point light 3
         shader.setVec3("pointLights[2].position", pointLightPositions[2]);
-        shader.setVec3("pointLights[3].position", pointLightPositions[3]);
+        shader.setVec3("pointLights[3].position", pointLightPositions[3]);*/
         shader.setMat4("view", view);
         shader.setMat4("model", model);
         shader.setVec3("viewPos", camera.Position);
 
-        // High-res FBO
         glBindFramebuffer(GL_FRAMEBUFFER, fboHigh.fbo);
         glViewport(0, 0, SCR_WIDTH, SCR_HEIGHT);
         shader.setBool("showShading", showShading);
@@ -395,21 +353,40 @@ int main()
         glClear(GL_COLOR_BUFFER_BIT);
         screenShader.use();
         glBindVertexArray(quadVAO);
-
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, fboHigh.texture);
+        screenShader.setBool("showShading", showShading);
         screenShader.setInt("screenTexture", 0);
-
+        screenShader.setVec2("predicted", predicted);
+        if (gaze_history.size() > 0)
+            screenShader.setVec2("true_gaze", glm::vec2((last->X + 1.0) / 2.0, (last->Y + 1) / 2.0));
         glDrawArrays(GL_TRIANGLES, 0, 6);
 
-        while ((err = glGetError()) != GL_NO_ERROR)
-        {
-            std::cout << "After process" << err << std::endl;
-        }
+        auto t5 = clock::now();
 
         glfwSwapBuffers(window);
         glfwPollEvents();
-    }
+
+        float t_api = std::chrono::duration<float, std::milli>(t1 - t0).count();
+        float t_gaze = std::chrono::duration<float, std::milli>(t2 - t1).count();
+        float t_infer = std::chrono::duration<float, std::milli>(t4 - t3).count();
+        float t_render = std::chrono::duration<float, std::milli>(t5 - t4).count();
+        float t_total = std::chrono::duration<float, std::milli>(t5 - frame_start).count();
+
+        std::cout << "[ms] API: " << t_api
+            << " | Gaze: " << t_gaze
+            << " | Infer: " << t_infer
+            << " | Render: " << t_render
+            << " | Total: " << t_total << std::endl;
+
+        // dt
+        float currentFrame = glfwGetTime();
+        deltaTime = currentFrame - lastFrame;
+        lastFrame = currentFrame;
+
+        while ((err = glGetError()) != GL_NO_ERROR)
+            std::cout << "After process: GL Error " << err << std::endl;
+}
 
     glfwTerminate();
     return 0;
@@ -530,11 +507,11 @@ float deg2rad(float deg)
     return deg * 3.1415 / 180.0f;
 }
 
-glm::vec2 gazeAngleToNorm(float predicted_x_deg, float predicted_y_deg)
+glm::vec2 gazeAngleToNorm(float x_deg, float y_deg)
 {
 
-    float x_rad = deg2rad(predicted_x_deg);
-    float y_rad = deg2rad(predicted_y_deg);
+    float x_rad = deg2rad(x_deg);
+    float y_rad = deg2rad(y_deg);
 
     float x_mm = std::tan(x_rad) * DIST_MM;
     float y_mm = std::tan(y_rad) * DIST_MM;
@@ -568,6 +545,19 @@ std::pair<float, float> pixelsToDegreesFromNormalized(float norm_x, float norm_y
     return { deg_x, deg_y };
 }
 
+float angleToNormRadius(float deg, float diagInInches, float distMM, int scrWidth, int scrHeight) {
+    float diagPx = std::sqrt(scrWidth * scrWidth + scrHeight * scrHeight);
+    float diagMM = diagInInches * 25.4f;
+    float pixelSizeMM = diagMM / diagPx;
+
+    float rad = glm::radians(deg);
+    float sizeMM = 2.0f * distMM * std::tan(rad / 2.0f);
+    float sizePx = sizeMM / pixelSizeMM;
+
+    float screenSizePx = std::min(scrWidth, scrHeight);  
+    return (sizePx / screenSizePx) / 2.0f;  // radius
+}
+
 void createTexture(GLuint& glid)
 {
     if (glid)
@@ -580,32 +570,38 @@ void createTexture(GLuint& glid)
 void setupShadingRatePalette()
 {
     GLint palSize;
-    glGetIntegerv(GL_SHADING_RATE_IMAGE_PALETTE_SIZE_NV, &palSize);
+    glGetIntegerv(NVShadingRate::PALETTE_SIZE, &palSize);
     assert(palSize >= 4);
 
     GLenum* palette = new GLenum[palSize];
 
-    palette[0] = GL_SHADING_RATE_NO_INVOCATIONS_NV;
-    palette[1] = GL_SHADING_RATE_1_INVOCATION_PER_PIXEL_NV;
-    palette[2] = GL_SHADING_RATE_1_INVOCATION_PER_2X2_PIXELS_NV;
-    palette[3] = GL_SHADING_RATE_1_INVOCATION_PER_4X4_PIXELS_NV;
+    palette[0] = NVShadingRate::NO_INVOCATIONS;
+    palette[1] = NVShadingRate::ONE_INVOCATION_PER_PIXEL;
+    palette[2] = NVShadingRate::ONE_INVOCATION_PER_2X2;
+    palette[3] = NVShadingRate::ONE_INVOCATION_PER_4X4;
 
     for (int i = 4; i < palSize; ++i)
     {
-        palette[i] = GL_SHADING_RATE_1_INVOCATION_PER_PIXEL_NV;
+        palette[i] = NVShadingRate::ONE_INVOCATION_PER_PIXEL;
     }
 
     glShadingRateImagePaletteNV(0, 0, palSize, palette);
     delete[] palette;
 }
 
-void createFoveationTexture(glm::vec2 point, bool isSaccade)
+void createFoveationTexture(glm::vec2 point, float error)
 {
 
     float centerX = point[0];
     float centerY = point[1];
     const int width = m_shadingRateImageWidth;
     const int height = m_shadingRateImageHeight;
+
+    float scale = 0.1f; 
+    float dynamicError = error * scale;
+    float innerR = INNER_R + dynamicError;
+    float middleR = MIDDLE_R + dynamicError;
+    std::cout << dynamicError << "  dd" << std::endl;
 
     for (int y = 0; y < height; ++y)
     {
@@ -615,11 +611,11 @@ void createFoveationTexture(glm::vec2 point, bool isSaccade)
             float fy = y / (float)height;
 
             float d = std::sqrt((fx - centerX) * (fx - centerX) + (fy - centerY) * (fy - centerY));
-            if (d < (INNER_R + INNER_R * isSaccade))
+            if (d < (innerR))
             {
                 m_shadingRateImageData[x + y * width] = 1;
             }
-            else if (d < (MIDDLE_R + MIDDLE_R * isSaccade))
+            else if (d < (MIDDLE_R))
             {
                 m_shadingRateImageData[x + y * width] = 2;
             }
@@ -636,4 +632,36 @@ void uploadFoveationDataToTexture(GLuint texture)
     glBindTexture(GL_TEXTURE_2D, texture);
     glTexStorage2D(GL_TEXTURE_2D, 1, GL_R8UI, m_shadingRateImageWidth, m_shadingRateImageHeight);
     glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, m_shadingRateImageWidth, m_shadingRateImageHeight, GL_RED_INTEGER, GL_UNSIGNED_BYTE, &m_shadingRateImageData[0]);
+}
+
+bool InitNVShadingRateImageExtensions() {
+    bool allLoaded = true;
+
+    allLoaded &= LoadGLFunction(glBindShadingRateImageNV, "glBindShadingRateImageNV");
+    allLoaded &= LoadGLFunction(glShadingRateImagePaletteNV, "glShadingRateImagePaletteNV");
+
+
+    if (!glfwExtensionSupported("GL_NV_shading_rate_image")) {
+        std::cout << "GL_NV_shading_rate_image not supported!" << std::endl;
+        allLoaded = false;
+    }
+    if (!glfwExtensionSupported("GL_NV_primitive_shading_rate")) {
+        std::cout << "GL_NV_primitive_shading_rate not supported!" << std::endl;
+        allLoaded = false;
+    }
+
+    return allLoaded;
+}
+
+template <typename T>
+bool LoadGLFunction(T& funcPtr, const char* name) {
+    funcPtr = reinterpret_cast<T>(glfwGetProcAddress(name));
+    if (!funcPtr) {
+        std::cerr << "Failed to load " << name << "!" << std::endl;
+        return false;
+    }
+    else {
+        std::cout << "Successfully loaded " << name << "!" << std::endl;
+        return true;
+    }
 }
