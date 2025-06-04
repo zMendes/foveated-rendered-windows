@@ -132,7 +132,7 @@ int main()
     const char* output_names[] = { "output" };
 
     // Load the model
-    const wchar_t* model_path = L"C:/Users/loenardomm8/Documents/saccade_predictor.onnx";
+    const wchar_t* model_path = L"C:/Users/loenardomm8/Documents/gaze1_predictor.onnx";
     Ort::Session session(env, model_path, session_options);
 
     // glfw: initialize and configure
@@ -169,7 +169,7 @@ int main()
     if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress))
     {
         std::cout << "Failed to initialize GLAD" << std::endl;
-        return -1; // Correct return here, exiting if GLAD fails
+        return -1; 
     }
 
     // OPENGL STATE
@@ -191,8 +191,7 @@ int main()
     Shader screenShader("screen.vs", "screen.fs");
     shader.use();
 
-    std::string path = "C:\\Users\\loenardomm8\\Documents\\sponza\\sponza.obj";
-
+    std::string path = "C:/Users/loenardomm8/Documents/sponza_2/sponza.obj";
     Model conference(path);
 
     GLenum err;
@@ -290,7 +289,9 @@ int main()
             float* output = output_tensors.front().GetTensorMutableData<float>();
             predicted_deg = { output[0], output[1] };
             predicted = gazeAngleToNorm(predicted_deg.first, predicted_deg.second);
-            createFoveationTexture(predicted, total_error);
+            createFoveationTexture(glm::vec2((last->X + 1.0) / 2.0, (last->Y + 1) / 2.0), total_error);
+            //createFoveationTexture(predicted, total_error);
+
         }
         auto t4 = clock::now();
 
@@ -298,7 +299,7 @@ int main()
         glm::mat4 view = camera.GetViewMatrix();
         glm::mat4 projection = glm::perspective(glm::radians(camera.Zoom), (float)SCR_WIDTH / (float)SCR_HEIGHT, 0.1f, 10000.0f);
         glm::mat4 model = glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, 0.f, 0.0f));
-        model = glm::scale(model, glm::vec3(.1f));
+        model = glm::scale(model, glm::vec3(0.20f));
 
         shader.use();
         glEnable(NVShadingRate::IMAGE);
@@ -315,30 +316,6 @@ int main()
         shader.setVec3("dirLight.ambient", 0.4f, 0.4f, 0.4f);
         shader.setVec3("dirLight.diffuse", 0.5f, 0.5f, 0.5f);
         shader.setVec3("dirLight.specular", 0.7f, 0.7f, 0.7f);
-        /*for (int i = 0; i < 4; i++)
-        {
-            shader.setVec3("pointLights[" + std::to_string(i) + "].diffuse", 1.0f, 1.0f, 1.0f);
-            shader.setVec3("pointLights[" + std::to_string(i) + "].specular", 1.0f, 1.0f, 1.0f);
-        }
-
-        shader.setVec3("dirLight.ambient", 0.3f, 0.3f, 0.3f);
-        for (int i = 0; i < 4; i++)
-        {
-            shader.setVec3("pointLights[" + std::to_string(i) + "].ambient", 0.3f, 0.3f, 0.3f);
-        }
-
-        for (int i = 0; i < 4; i++)
-        {
-            shader.setFloat("pointLights[" + std::to_string(i) + "].constant", 1.0f);
-            shader.setFloat("pointLights[" + std::to_string(i) + "].linear", 0.007f);
-            shader.setFloat("pointLights[" + std::to_string(i) + "].quadratic", 0.0017f);
-        }
-
-        shader.setVec3("pointLights[0].position", pointLightPositions[0]);
-        shader.setVec3("pointLights[1].position", pointLightPositions[1]);
-        // point light 3
-        shader.setVec3("pointLights[2].position", pointLightPositions[2]);
-        shader.setVec3("pointLights[3].position", pointLightPositions[3]);*/
         shader.setMat4("view", view);
         shader.setMat4("model", model);
         shader.setVec3("viewPos", camera.Position);
@@ -591,7 +568,6 @@ void setupShadingRatePalette()
 
 void createFoveationTexture(glm::vec2 point, float error)
 {
-
     float centerX = point[0];
     float centerY = point[1];
     const int width = m_shadingRateImageWidth;
@@ -601,7 +577,6 @@ void createFoveationTexture(glm::vec2 point, float error)
     float dynamicError = error * scale;
     float innerR = INNER_R + dynamicError;
     float middleR = MIDDLE_R + dynamicError;
-    std::cout << dynamicError << "  dd" << std::endl;
 
     for (int y = 0; y < height; ++y)
     {
